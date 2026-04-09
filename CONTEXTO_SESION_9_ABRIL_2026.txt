@@ -1,0 +1,146 @@
+===============================================================================
+CONTEXTO SESIÓN 9 ABRIL 2026 - Resumen completo
+===============================================================================
+
+## CORRECCIONES DE DATOS CAT 08 (Base de datos producción - DigitalOcean)
+
+### 1. Fix caras_flujo / caras_contraflujo = 0
+- 105 solicitudCaras con caras > 0 pero flujo=0, contraflujo=0
+- El script migrate_cat08_fix.js no seteó flujo/contraflujo
+- Fix: SET caras_flujo = CEIL(caras/2), caras_contraflujo = FLOOR(caras/2)
+- Frontend mostraba 0/0 en vez de X/Y
+
+### 2. Fix mismatches flujo+contraflujo != caras
+- 36 caras donde flujo+contraflujo no sumaba igual que caras
+- Recalculados a 50/50 (ceil/floor)
+
+### 3. Fix EMBASA (sc.6895) y CRUNCHYROLL (sc.6888)
+- EMBASA: caras=0 -> 38, costo=0 -> 174800
+- CRUNCHYROLL: caras=0 -> 5, costo=0 -> 22500
+
+### 4. Fix datos faltantes en solicitudes Cat 08 (24 campañas nuevas)
+- marca_nombre, producto_nombre, asesor: NULL -> llenados desde CSV
+- solicitud.presupuesto: 0 -> monto total del CSV
+- solicitud.sap_database: NULL -> TRADE (APS 1000-2000) o CIMU (APS 60000+)
+- propuesta.inversion y cotizacion.precio: 0 -> monto del CSV
+- campania.total_caras: 0 -> calculado de solicitudCaras
+- cotizacion.numero_caras, frontal, cruzada: 0 -> calculados de solicitudCaras
+
+### 5. Fix BANCO AZTECA VISA (APS 70855)
+- Se escapó del fix anterior por no tener notas "Cat 08"
+- Mismos campos llenados: presupuesto, inversion, precio, sap_database=CIMU
+
+### 6. Fix cotizaciones con frontal=0 cruzada=0
+- 7 cotizaciones recalculadas (70918, 70808, 70801, 70723, 70744, 70924, 70875)
+
+### 7. Fix producto_nombre NULL en solicitudes CARGADAS
+- 17 solicitudes con producto_nombre=NULL llenado desde CSV (nombre de campaña)
+
+### 8. Fix FARMACIAS SIMILARES (70508) tarifas Cat 8
+- 7 artículos con tarifa desactualizada (ej: 2500->2575, 3500->3605)
+- Costo recalculado acorde
+
+### 9. Fix artículos IN (Intercambio) - cambio de modelo
+- 16 artículos IN en Cat 08 cambiados de bonificacion a caras
+- Antes: caras=0, bonificacion=N, tarifa=0
+- Ahora: caras=N, bonificacion=0, flujo/contraflujo 50/50, tarifa del CSV
+- Afecta: SANBORNS (1402), SEARS (1404), OCESA/Tecate (70830)
+- Cotizaciones y campañas recalculadas para estas 3
+
+### 10. Fix OXXO (APS 70739) registro fusionado
+- RT-P1-DIG-MX tenía 46 caras (23 MX + 23 GDL fusionadas)
+- Corregido a 23 caras MX con tarifa $7,294
+- Cotización y campaña recalculadas
+
+### 11. Fix ciudades "MIGUEL HIDALGO" en caras Cat 08
+- 163 solicitudCaras actualizadas con municipios reales del inventario
+- MIGUEL HIDALGO -> todos los municipios de CDMX (21 municipios)
+- GUADALAJARA -> GUADALAJARA, SAN PEDRO TLAQUEPAQUE, ZAPOPAN
+- MONTERREY -> GUADALUPE, MONTERREY, SAN NICOLÁS DE LOS GARZA, SANTA CATARINA
+- PUEBLA -> PUEBLA, SAN ANDRES CHOLULA, SAN PEDRO CHOLULA
+- TOLUCA -> LERMA, METEPEC, SAN MATEO ATENCO, TOLUCA
+- BOCA DEL RÍO -> ALVARADO, BOCA DEL RÍO, VERACRUZ
+- Fuente: tabla inventarios agrupada por plaza
+
+### Verificación final Cat 08
+- 115 campañas del CSV verificadas
+- 114 OK, 1 pendiente (OXXO registro GDL descartado)
+- Scripts de verificación: Documents/qeb/verify_cat08_final.js
+
+## CAMBIOS EN CÓDIGO
+
+### Frontend (front-qeb)
+
+#### Intercambios (IN) - nuevo comportamiento en 3 archivos:
+- CreateSolicitudModal.tsx
+- AssignInventarioModal.tsx (propuestas)
+- AssignInventarioCampanaModal.tsx (campañas)
+
+Cambios:
+- IN ya no es tratado como bonificación
+- isTarifaCero: quitado IN (solo CT tiene tarifa forzada a 0)
+- Input renta/caras: desbloqueado para IN (antes disabled como CT)
+- Input bonificación: bloqueado para IN (como IM)
+- Input tarifa pública: desbloqueado para IN (antes disabled como CT)
+- IN va a autorización DCM pendiente (sin cambio en backend)
+
+#### Skip auth al editar solicitud (CreateSolicitudModal.tsx)
+- handleSubmit ahora envía autorizacion_dg y autorizacion_dcm por cara
+- Antes: solo mandaba datos, backend recalculaba siempre
+- Ahora: si skipAuthEval, manda autorización original y backend la respeta
+
+#### Distribución flujo/contraflujo con guardado en BD (AssignInventarioModal.tsx)
+- Input de % ahora guarda en BD al momento (onChange, no onBlur)
+- Llama propuestasService.updateCara() con caras_flujo/caras_contraflujo
+- Actualiza selectedCaraForSearch y caras en state local
+- Loading indicator "..." mientras guarda
+- KPIs muestran valores reales de BD (no recalculan desde %)
+- Al seleccionar cara, % se calcula del DB (no siempre 50%)
+
+#### Invalidar cache al cerrar modal inventario (PropuestasPage.tsx)
+- Al cerrar AssignInventarioModal, invalida queries propuesta-caras y propuesta-reservas-modal
+- Así el check de "reservas incompletas" usa datos frescos para pase a ventas
+
+#### Orden de Montaje (OrdenesMontajeModal.tsx + campanas.service.ts)
+- Columna "APS Global" agregada (= propuesta_id, color fuchsia)
+- Interface OrdenMontajeCAT: campo aps_global agregado
+- Catorcena actual se marca por default al abrir modal
+- Opciones de catorcena vienen de tabla catorcenas (no de datos filtrados)
+- Frontend calcula rango min/max de selectedCatorcenas y lo envía al backend
+
+### Backend (qeb-Back)
+
+#### Skip auth en solicitudes (solicitudes.controller.ts)
+- Método update: si cara trae autorizacion_dg/dcm del frontend, los usa
+- Solo recalcula autorización si no vienen (crear nueva solicitud)
+
+#### Pool timeout Hostinger (utils/prisma.ts - SOLO DEV)
+- pool_timeout forzado a 60s (antes 30s)
+- Evita timeout en operaciones pesadas
+
+#### Orden de Montaje (campanas.controller.ts)
+- Asesor: pr.asignado -> sol.nombre_usuario (creador)
+- Fechas: DATE(sc.inicio_periodo) para evitar desfase timezone
+- APS Global: ct.id_propuesta AS aps_global
+- Kioscos excluidos: formato NOT LIKE '%iosco%' en Ocupacion VP
+- Status: rsv.estatus IN ('Vendido', 'Bonificado') en INNER JOIN
+- COLLATE utf8mb4_unicode_ci en JOIN solicitudCaras para evitar error collation
+- Filtro default: catorcena actual si no viene filtro del frontend
+
+## ARCHIVOS CREADOS
+
+### Scripts de verificación/corrección (Documents/qeb/):
+- compare_cat08_full.js: comparación completa CSV vs BD
+- verify_cat08_final.js: verificación final de 115 campañas
+- fix_cat08.js: fix flujo/contraflujo y EMBASA/CRUNCHYROLL
+- fix_cat08_remaining.js: fix VISA, cotizaciones, producto, tarifas
+- fix_cat08_ciudades.js: fix ciudades con municipios del inventario
+
+## RESULTADO FINAL CAT 08
+- 115 campañas del CSV verificadas contra BD producción
+- 114 completamente OK
+- 1 con diferencia aceptada (OXXO GDL descartado por artículo MX)
+- Todos los datos de solicitud llenados (marca, producto, asesor, presupuesto, sap_database)
+- Todas las caras con flujo/contraflujo correcto
+- Todas las ciudades con municipios reales del inventario
+- IN tratados como renta (no bonificación) con tarifa del CSV
