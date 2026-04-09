@@ -1,0 +1,139 @@
+===============================================================================
+CONTEXTO SESIÓN 8 ABRIL 2026 - Resumen completo
+===============================================================================
+
+## CAMBIOS EN CÓDIGO (FRONT + BACK)
+
+### 1. DG Contaminación + Impar por grupo (Solicitudes)
+- CreateSolicitudModal.tsx: impar check es POR GRUPO (renta+bonif de cada cara), no global
+- Si alguna cara tiene DG pendiente, contamina las DCM pendientes → DG
+- NO contamina las ya aprobadas
+- Guarda _originalDg/_originalDcm para recalcular desde cero al editar
+- Al editar solo ciudad/NSE (sin cambiar renta/bonif/tarifa/formato/tipo/articulo), NO re-evalúa autorización (skipAuthEval)
+- Backend autorizacion.service.ts: DG contamina sin requerir propuestaId
+
+### 2. Tarifa Pública en Tarea de Autorización
+- NotificacionesPage.tsx: columna "Tarifa" (tarifa_publica) al lado de "Tarifa Efect." en tabla de autorización DG/DCM
+
+### 3. Catorcena Range (Rango de periodos)
+- CreateSolicitudModal.tsx: al seleccionar rango de catorcenas (inicio a fin), crea UNA cara por cada catorcena del rango
+- Antes solo creaba una cara con catorcenaNum del inicio
+
+### 4. Filtros en Cascada Dashboard
+- DashboardPage.tsx: estado → ciudad → formato → NSE, cada filtro filtra las opciones del siguiente
+- Backend dashboard.controller.ts: filter-options devuelve ciudades/formatos/nses con estado/plaza para cascada
+
+### 5. Disponibles: municipio en vez de plaza
+- inventarios.controller.ts: getDisponibles y getFormatosByCiudad buscan por municipio en vez de plaza
+- Fix para Oaxaca y CDMX donde ciudad ≠ plaza
+
+### 6. Delivery Note SAP
+- U_CodTAsig: 204 para Bonificado, 200 para Venta (antes hardcoded 204)
+- U_dscTAsig: "Vendido" se muestra como "Venta"
+- U_IMU_ART_APS: usa propuesta_id en vez de campania.id (fix desfase IDs)
+- U_Cod_Sitio y U_dscSitio: vienen del artículo SAP (U_IMU_cod_sitio, U_IMU_dscSitio) en vez de hardcoded 11/"estado"
+- SalesPersonCode: sigue -1 (pendiente de resolver)
+
+### 7. Campañas: búsqueda por propuesta_id + tabla muestra propuesta_id
+- campanas.controller.ts: search incluye ct.id_propuesta
+- CampanasPage.tsx: tabla muestra #propuesta_id en vez de #campania_id
+- getById devuelve propuesta_id para el delivery note
+
+### 8. Clientes SAP: visible en ambas tabs
+- clientes.controller.ts: getSAPClientesByDatabase solo filtra CUICs de la MISMA database, no de todas
+- Un cliente de TRADE sigue apareciendo en CIMU y viceversa
+
+### 9. Compartir Propuesta: campo Cliente
+- propuestas.controller.ts: getFullDetails y getPublicDetails incluyen nombre del cliente
+- Fallback a razon_social si el cliente no se encuentra por ID
+
+### 10. Carga Masiva Inventarios
+- Loading spinner al parsear archivos grandes
+- Dos tabs (Errores/OK) con paginación de 50
+- Sin columna tarifa en preview
+- Step check: 3 tabs clickeables (Nuevos/Existentes/Ocupados)
+- Cada tab: tabla paginada + botón "CSV" + botón "CSV con Campañas" (ocupados)
+- Campaña info para ocupados viene del backend (campania.nombre via cotizacion)
+- overscroll-contain en modal
+- Botón plantilla CSV en AssignInventarioModal de propuestas
+
+### 11. Auto_increments sincronizados
+- campania y cotizacion auto_increment subidos a 80203 (igual que propuesta/solicitud)
+- Futuros registros coincidirán en ID
+
+## BASE DE DATOS - CAMBIOS EN PRODUCCIÓN (DigitalOcean)
+
+### Migración Hostinger → DigitalOcean
+- Base: u658050396_QEB en qeb-mysql-prod-do-user-32408772-0.g.db.ondigitalocean.com:25060
+- Usuario: doadmin / AVNS_GUPCVh6o1ZSAOK0EL0J
+- SSL requerido, CA cert en Downloads/ca-certificate.crt
+- Trusted Sources: IP cambia frecuentemente, verificar con curl -s -4 ifconfig.me
+
+### Columnas ampliadas
+- Todas las varchar < 100 → varchar(255)
+- Todas las varchar 100-200 → varchar(255) (segunda ronda)
+- propuesta.asignado, solicitud.asignado → TEXT
+- solicitud.descripcion, solicitud_original.descripcion, tareas.descripcion → TEXT
+- tareas.listado_inventario, tareas.nombre_proveedores → TEXT
+- cotizacion.observaciones → TEXT
+
+### Datos corregidos
+- Solicitudes 80041,42,44,45,50,52,55: nombre_usuario corregido
+- Solicitud 80057: 10 caras DCM → DG (contaminación)
+- Artículos propuesta 80046: CF → RT corregidos
+- Propuesta 80035 cat 9: ciudad cambiada a Guadalajara + articulo RT-P1-COB-GDL
+- Oaxaca inventarios: estado vuelto a "Oaxaca de Juárez" (no se cambió)
+
+### Índices creados
+- idx_ano_catorcena ON catorcenas (año, numero_catorcena)
+- idx_rsv_deleted_estatus ON reservas (deleted_at, estatus)
+
+## MIGRACIÓN CAT 08
+
+### Resumen
+- 50 campañas CARGADA EN QEB: caras corregidas (RT partidos en RT+BF+IN)
+- 41 campañas existentes: extendidas a cat 8 (fecha_fin → 27 abr 2026)
+- 24 campañas nuevas: creadas completas (solicitud+propuesta+cotización+campaña+caras)
+- 208 caras NSE "Todos" → "ABC+,CD,DE"
+- Verificación final: 330/330 grupos OK, 24/24 nuevas completas, 0 errores
+
+### Archivos
+- CSV migración: Downloads/Cat08_listo_para_migrar.csv (10,281 filas)
+- CSV comparación: Downloads/comparacion_cat08_resultado.csv
+- Script migración: extras/scripts/migrate_cat08_fix.js
+- Script comparación: extras/scripts/compare_cat08.js
+- Pendientes: extras/PENDIENTE_CAT08_COMPARACION.txt
+
+### Usuarios/Asignados
+- 24 asesores del excel matcheados con usuarios de BD
+- "CORPORATIVO" = Karla Basurto Michelena (1057689)
+- Roles incluidos como asignados: Analista de Servicio al Cliente, Asesor Analista, Diseñadores
+- NO incluido: Coordinador de Diseño
+
+## DESFASE IDs CAMPAÑA/PROPUESTA
+- Desde campaña 80062: campania_id ≠ propuesta_id (diferencia de 7-10)
+- No se renumeraron IDs (riesgoso)
+- Se resolvió mostrando propuesta_id en tabla y usando propuesta_id para APS en delivery note
+- Auto_increments sincronizados para futuros
+
+## SAP - ENDPOINTS
+- TRADE (APS 1000-2000): https://10.1.0.9:50000/b1s/v2/
+- CIMU (APS 60000+): https://10.1.0.9:50000/b1s/v1/
+- Login: POST /Login con CompanyDB, UserName, Password
+- Orders: GET /Orders?$filter=DocNum ge {APS} and DocNum le {APS}&$select=DocEntry,DocNum,CardCode,CardName,DocumentLines
+- Articulos: GET /Items?$select=ItemCode,ItemName,U_IMU_OcrCode,U_IMU_OcrName,U_IMU_CodTAsig,U_IMU_DscTAsig,U_IMU_cod_sitio,U_IMU_dscSitio,...
+
+## POWER BI
+- Vistas SQL son en tiempo real (no snapshots)
+- No hay que actualizar nada manualmente los viernes
+- BI puede programar scheduled refresh en Power BI Service
+
+## GIT - ESTADO ACTUAL
+- main revertido a estado de deploy 8e15fad + type fix del articulosMap
+- Commits de Bladi (cortesías + tutorial) revertidos
+- dev tiene cambios locales sin pushear (bulk upload, cascade filters, etc.)
+
+## PENDIENTES
+- Bladi debe re-aplicar sus cambios de cortesías bajando main primero
+- Connection pool en DigitalOcean: subir connection_limit (actualmente 2, debería ser 10+)
+- Bug de fechas/periodos mensuales en tablas y compartir (no se implementó)

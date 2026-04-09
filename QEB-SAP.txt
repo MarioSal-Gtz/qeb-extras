@@ -1,0 +1,1270 @@
+import express from "express";
+import cors from "cors";
+import axios from "axios";
+import https from "https";
+
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: "10mb" }));
+
+const httpsAgent = new https.Agent({
+  rejectUnauthorized: false,
+});
+
+// ==========================================
+// ?? SISTEMA DE CACHÉ GLOBAL
+// ==========================================
+
+const cache = {
+  articulos: { data: null, timestamp: null },
+  cuic: { data: null, timestamp: null },
+  "cuic-test": { data: null, timestamp: null },
+  "cuic-trade": { data: null, timestamp: null },
+  aca: { data: null, timestamp: null },
+  cm: { data: null, timestamp: null },
+  mpc: { data: null, timestamp: null },
+  asesor: { data: null, timestamp: null },
+  "articulos-trade": { data: null, timestamp: null },
+};
+
+const CACHE_DURATIONS = {
+  articulos: 604800000,
+  cuic: 604800000,
+  "cuic-test": 0,
+  "cuic-trade": 0,
+  aca: 604800000,
+  cm: 604800000,
+  mpc: 604800000,
+  asesor: 604800000,
+  "articulos-trade": 604800000,
+};
+
+function getCache(key) {
+  const cached = cache[key];
+  if (!cached || !cached.data || !cached.timestamp) {
+    return null;
+  }
+  
+  const age = Date.now() - cached.timestamp;
+  const maxAge = CACHE_DURATIONS[key] || 604800000;
+  
+  if (age < maxAge) {
+    const ageHours = Math.round(age / 3600000);
+    console.log(`? Cache HIT para ${key} (edad: ${ageHours}h)`);
+    return cached.data;
+  }
+  
+  console.log(`? Cache EXPIRED para ${key}`);
+  return null;
+}
+
+function setCache(key, data) {
+  cache[key] = {
+    data: data,
+    timestamp: Date.now()
+  };
+  console.log(`?? Cache SAVED para ${key} (${data.value?.length || 0} registros)`);
+}
+
+// ==========================================
+// ?? CONFIGURACIÓN DE LOGIN Y SESIONES
+// ==========================================
+
+const loginConfigs = {
+  CATALOGOS_BI: {
+    CompanyDB: "CATALOGOS_BI",
+    UserName: "manager",
+    Password: "saP18ti",
+  },
+  SBOCIMU: {
+    CompanyDB: "SBOCIMU",
+    UserName: "manager",
+    Password: "Grup0$1Mu$",
+  },
+  PB_SBOCIMU: {
+    CompanyDB: "PB_SBOCIMU",
+    UserName: "manager",
+    Password: "Grup0$1Mu$",
+  },
+  PB_SBOIMUTRADE: {
+    CompanyDB: "PB_SBOIMUTRADE",
+    UserName: "manager",
+    Password: "Grup0$1Mu$",
+  },
+  SBOIMUTRADE: {
+    CompanyDB: "SBOIMUTRADE",
+    UserName: "manager",
+    Password: "Grup0$1Mu$",
+  },
+};
+
+let sessions = {
+  CATALOGOS_BI: null,
+  SBOCIMU: null,
+  PB_SBOCIMU: null,
+  PB_SBOIMUTRADE: null,
+  SBOIMUTRADE: null,
+};
+
+let sessionTimestamps = {
+  CATALOGOS_BI: null,
+  SBOCIMU: null,
+  PB_SBOCIMU: null,
+  PB_SBOIMUTRADE: null,
+  SBOIMUTRADE: null,
+};
+
+const SESSION_DURATION = 25 * 60 * 1000;
+
+async function getSession(dbType) {
+  try {
+    if (
+      sessions[dbType] &&
+      sessionTimestamps[dbType] &&
+      Date.now() - sessionTimestamps[dbType] < SESSION_DURATION
+    ) {
+      console.log(`?? Reutilizando sesión válida para ${dbType}`);
+      return sessions[dbType];
+    }
+
+    // PB_SBOIMUTRADE usa v2, los demás usan v1
+    const apiVersion = (dbType === "PB_SBOIMUTRADE" || dbType === "SBOIMUTRADE") ? "v2" : "v1";
+    const loginUrl = `https://10.1.0.9:50000/b1s/${apiVersion}/Login`;
+    const loginData = loginConfigs[dbType];
+
+    const response = await axios.post(loginUrl, loginData, {
+      headers: {
+        "Content-Type": "application/json",
+      },
+      httpsAgent,
+    });
+
+    const setCookieHeader = response.headers["set-cookie"];
+    if (setCookieHeader) {
+      const sessionCookie = setCookieHeader.find((cookie) =>
+        cookie.startsWith("B1SESSION=")
+      );
+      if (sessionCookie) {
+        const sessionId = sessionCookie.split(";")[0];
+        sessions[dbType] = sessionId;
+        sessionTimestamps[dbType] = Date.now();
+        console.log(`? Login exitoso para ${dbType}: ${sessionId}`);
+        return sessionId;
+      }
+    }
+
+    throw new Error("No se pudo obtener la sesión");
+  } catch (error) {
+    console.error(`? Error en login para ${dbType}:`, error.message);
+    throw error;
+  }
+}
+
+const endpointsPermitidos = {
+  ACA: "BI_CRM_ACA",
+  CM: "BI_CRM_CM",
+  MPC: "BI_CRM_MPC",
+  ASESOR: "BI_CRM_Asesor",
+};
+
+// ==========================================
+// ?? ENDPOINTS
+// ==========================================
+
+app.get("/", (req, res) => {
+  res.send("Servidor corriendo ??");
+});
+
+app.get("/cache-status", (req, res) => {
+  const status = {};
+  
+  Object.keys(cache).forEach(key => {
+    const cached = cache[key];
+    if (cached.data && cached.timestamp) {
+      const age = Date.now() - cached.timestamp;
+      const maxAge = CACHE_DURATIONS[key];
+      const ageHours = Math.round(age / 3600000);
+      const expiresInHours = Math.round((maxAge - age) / 3600000);
+      
+      status[key] = {
+        cached: true,
+        ageHours: ageHours,
+        expiresInHours: expiresInHours,
+        records: cached.data.value?.length || 'N/A'
+      };
+    } else {
+      status[key] = { cached: false };
+    }
+  });
+  
+  res.json(status);
+});
+
+app.get("/clear-cache", (req, res) => {
+  const key = req.query.key;
+  
+  if (key) {
+    cache[key] = { data: null, timestamp: null };
+    console.log(`??? Cache limpiado para: ${key}`);
+    res.json({ success: true, message: `Cache limpiado para ${key}` });
+  } else {
+    Object.keys(cache).forEach(k => {
+      cache[k] = { data: null, timestamp: null };
+    });
+    console.log(`??? TODO el cache limpiado`);
+    res.json({ success: true, message: "Todo el cache limpiado" });
+  }
+});
+
+app.get("/api/:tipo", async (req, res) => {
+  const tipo = req.params.tipo;
+
+  if (!endpointsPermitidos[tipo]) {
+    return res.status(400).json({ error: "Tipo inválido" });
+  }
+
+  const cacheKey = tipo.toLowerCase();
+  const cachedData = getCache(cacheKey);
+  if (cachedData) {
+    return res.json(cachedData);
+  }
+
+  try {
+    if (!sessions.CATALOGOS_BI) {
+      await getSession("CATALOGOS_BI");
+    }
+
+    const url = `https://10.1.0.9:50000/b1s/v1/${endpointsPermitidos[tipo]}`;
+    const { data } = await axios.get(url, {
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: sessions.CATALOGOS_BI,
+        Prefer: "odata.maxpagesize=0",
+      },
+      httpsAgent,
+    });
+
+    setCache(cacheKey, data);
+    res.json(data);
+  } catch (error) {
+    console.error("Error en /api:", error.message);
+
+    if (cache[cacheKey]?.data) {
+      console.log(`?? VPN caída, devolviendo caché antiguo de ${cacheKey}`);
+      return res.json(cache[cacheKey].data);
+    }
+
+    if (error.response?.status === 401) {
+      try {
+        await getSession("CATALOGOS_BI");
+        const url = `https://10.1.0.9:50000/b1s/v1/${endpointsPermitidos[tipo]}`;
+        const { data } = await axios.get(url, {
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: sessions.CATALOGOS_BI,
+            Prefer: "odata.maxpagesize=0",
+          },
+          httpsAgent,
+        });
+        setCache(cacheKey, data);
+        return res.json(data);
+      } catch (retryError) {
+        console.error("Error en reintento:", retryError.message);
+      }
+    }
+
+    res.status(500).json({ error: "Error al hacer la solicitud" });
+  }
+});
+
+// ?? CUIC PRODUCCIÓN
+app.get("/cuic", async (req, res) => {
+  console.log("?? Accediendo a /cuic (PRODUCCIÓN)...");
+  
+  const cachedData = getCache('cuic');
+  if (cachedData) {
+    return res.json(cachedData);
+  }
+  
+  try {
+    if (!sessions.CATALOGOS_BI) {
+      await getSession("CATALOGOS_BI");
+    }
+    if (!sessions.SBOCIMU) {
+      await getSession("SBOCIMU");
+    }
+
+    const [acaResponse, cmResponse, mpcResponse, asesorResponse] =
+      await Promise.all([
+        axios.get("https://10.1.0.9:50000/b1s/v1/BI_CRM_ACA", {
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: sessions.CATALOGOS_BI,
+            Prefer: "odata.maxpagesize=0",
+          },
+          httpsAgent,
+        }),
+        axios.get("https://10.1.0.9:50000/b1s/v1/BI_CRM_CM", {
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: sessions.CATALOGOS_BI,
+            Prefer: "odata.maxpagesize=0",
+          },
+          httpsAgent,
+        }),
+        axios.get("https://10.1.0.9:50000/b1s/v1/BI_CRM_MPC", {
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: sessions.CATALOGOS_BI,
+            Prefer: "odata.maxpagesize=0",
+          },
+          httpsAgent,
+        }),
+        axios.get("https://10.1.0.9:50000/b1s/v1/BI_CRM_Asesor", {
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: sessions.CATALOGOS_BI,
+            Prefer: "odata.maxpagesize=0",
+          },
+          httpsAgent,
+        }),
+      ]);
+
+    console.log("?? Obteniendo BusinessPartners válidos de SBOCIMU...");
+
+    const bpResponse = await axios.get(
+      "https://10.1.0.9:50000/b1s/v1/BusinessPartners?$select=CardCode,CardName",
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: sessions.SBOCIMU,
+          Prefer: "odata.maxpagesize=0",
+        },
+        httpsAgent,
+      }
+    );
+
+    const acaData = acaResponse.data.value || [];
+    const cmData = cmResponse.data.value || [];
+    const mpcData = mpcResponse.data.value || [];
+    const asesorData = asesorResponse.data.value || [];
+
+    const bpList = bpResponse.data.value || [];
+    const validCardCodes = new Set(bpList.map(bp => bp.CardCode));
+
+    // Mapa de CardName -> CardCode para buscar por nombre cuando U_SAPCode está vacío
+    const cardNameToCode = {};
+    for (const bp of bpList) {
+      if (bp.CardName) {
+        cardNameToCode[bp.CardName.trim().toUpperCase()] = bp.CardCode;
+      }
+    }
+
+    console.log(`?? Datos obtenidos - ACA: ${acaData.length}, CM: ${cmData.length}, MPC: ${mpcData.length}, ASESOR: ${asesorData.length}`);
+    console.log(`? CardCodes válidos en SBOCIMU: ${validCardCodes.size}`);
+
+    const asesorMap = {};
+    for (const asesor of asesorData) {
+      asesorMap[asesor.U_IDAsesor] = asesor;
+    }
+
+    const joinedData = [];
+    let matchedByName = 0;
+
+    for (const aca of acaData) {
+      let resolvedCardCode = aca.U_SAPCode;
+
+      if (validCardCodes.has(resolvedCardCode)) {
+        // CardCode directo encontrado
+      } else if (aca.U_RazonSocial) {
+        // Sin CardCode o no existe, buscar por razón social
+        const nameKey = aca.U_RazonSocial.trim().toUpperCase();
+        const foundCode = cardNameToCode[nameKey];
+        if (foundCode) {
+          resolvedCardCode = foundCode;
+          matchedByName++;
+        } else {
+          continue;
+        }
+      } else {
+        continue;
+      }
+
+      const matchingCM = cmData.filter((cm) => cm.U_IDACA === aca.U_IDACA);
+
+      for (const cm of matchingCM) {
+        const matchingMPC = mpcData.filter((mpc) => mpc.U_IDCM === cm.U_IDCM);
+
+        for (const mpc of matchingMPC) {
+          const asesor = asesorMap[aca.U_IDAsesor] || {};
+
+          joinedData.push({
+            T0_U_IDAsesor: aca.U_IDAsesor,
+            T0_U_Asesor: aca.U_Asesor,
+            T0_U_IDAgencia: aca.U_IDAgencia,
+            T0_U_Agencia: aca.U_Agencia,
+            T0_U_Cliente: aca.U_Cliente,
+            T0_U_RazonSocial: aca.U_RazonSocial,
+            T0_U_IDACA: aca.U_IDACA,
+            ACA_U_SAPCode: resolvedCardCode,
+            ASESOR_U_IDAsesor: asesor.U_IDAsesor || null,
+            ASESOR_U_Asesor: asesor.U_Asesor || null,
+            ASESOR_U_SAPCode: asesor.U_SAPCode || null,
+            ASESOR_U_UnidadNegocio: asesor.U_UnidadNegocio || null,
+            T1_U_Cliente: cm.U_Cliente,
+            T1_U_IDACA: cm.U_IDACA,
+            T1_U_IDCM: cm.U_IDCM,
+            T1_U_IDMarca: cm.U_IDMarca,
+            T1_U_UnidadNegocio: cm.U_UnidadNegocio,
+            T1_U_ValidFrom: cm.U_ValidFrom,
+            T1_U_ValidTo: cm.U_ValidTo,
+            T2_U_IDCategoria: mpc.U_IDCategoria,
+            T2_U_Categoria: mpc.U_Categoria,
+            T2_U_IDCM: mpc.U_IDCM,
+            T2_U_IDProducto: mpc.U_IDProducto,
+            T2_U_Marca: mpc.U_Marca,
+            T2_U_Producto: mpc.U_Producto,
+            T2_U_ValidFrom: mpc.U_ValidFrom,
+            T2_U_ValidTo: mpc.U_ValidTo,
+            CUIC: mpc.U_IDMPC || mpc.Code || mpc.U_Code,
+          });
+        }
+      }
+    }
+
+    console.log(`? JOIN completado - ${joinedData.length} registros VÁLIDOS para SBOCIMU (${matchedByName} encontrados por nombre)`);
+
+    const result = {
+      odata: {
+        context: "CUIC_JOIN_RESULT",
+        environment: "PRODUCCION",
+      },
+      value: joinedData,
+      totalRecords: joinedData.length,
+    };
+
+    setCache('cuic', result);
+    
+    res.json(result);
+  } catch (error) {
+    console.error("Error en /cuic:", error.message);
+
+    if (cache.cuic?.data) {
+      console.log(`?? VPN caída, devolviendo caché antiguo de CUIC`);
+      return res.json(cache.cuic.data);
+    }
+
+    if (error.response?.status === 401) {
+      try {
+        await getSession("CATALOGOS_BI");
+        return res.status(401).json({ error: "Sesión expirada, intenta nuevamente" });
+      } catch (retryError) {
+        console.error("Error en reintento CUIC:", retryError.message);
+      }
+    }
+
+    res.status(500).json({
+      error: "Error al obtener datos CUIC",
+      details: error.response?.data || error.message,
+    });
+  }
+});
+
+// ?? CUIC TEST (PB_SBOCIMU)
+app.get("/cuic-test", async (req, res) => {
+  console.log("?? Accediendo a /cuic-test (PB_SBOCIMU)...");
+  
+  try {
+    if (!sessions.CATALOGOS_BI) {
+      await getSession("CATALOGOS_BI");
+    }
+    
+    if (!sessions.PB_SBOCIMU) {
+      await getSession("PB_SBOCIMU");
+    }
+
+    console.log("?? Obteniendo datos de catálogos...");
+
+    const [acaResponse, cmResponse, mpcResponse, asesorResponse] = await Promise.all([
+      axios.get("https://10.1.0.9:50000/b1s/v1/BI_CRM_ACA", {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: sessions.CATALOGOS_BI,
+          Prefer: "odata.maxpagesize=0",
+        },
+        httpsAgent,
+      }),
+      axios.get("https://10.1.0.9:50000/b1s/v1/BI_CRM_CM", {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: sessions.CATALOGOS_BI,
+          Prefer: "odata.maxpagesize=0",
+        },
+        httpsAgent,
+      }),
+      axios.get("https://10.1.0.9:50000/b1s/v1/BI_CRM_MPC", {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: sessions.CATALOGOS_BI,
+          Prefer: "odata.maxpagesize=0",
+        },
+        httpsAgent,
+      }),
+      axios.get("https://10.1.0.9:50000/b1s/v1/BI_CRM_Asesor", {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: sessions.CATALOGOS_BI,
+          Prefer: "odata.maxpagesize=0",
+        },
+        httpsAgent,
+      }),
+    ]);
+
+    console.log("?? Obteniendo BusinessPartners válidos de PB_SBOCIMU...");
+
+    const bpResponse = await axios.get(
+      "https://10.1.0.9:50000/b1s/v1/BusinessPartners?$select=CardCode,CardName",
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: sessions.PB_SBOCIMU,
+          Prefer: "odata.maxpagesize=0",
+        },
+        httpsAgent,
+      }
+    );
+
+    const acaData = acaResponse.data.value || [];
+    const cmData = cmResponse.data.value || [];
+    const mpcData = mpcResponse.data.value || [];
+    const asesorData = asesorResponse.data.value || [];
+
+    const bpList = bpResponse.data.value || [];
+    const validCardCodes = new Set(bpList.map(bp => bp.CardCode));
+
+    // Mapa de CardName -> CardCode para buscar por nombre cuando U_SAPCode está vacío
+    const cardNameToCode = {};
+    for (const bp of bpList) {
+      if (bp.CardName) {
+        cardNameToCode[bp.CardName.trim().toUpperCase()] = bp.CardCode;
+      }
+    }
+
+    console.log(`? CardCodes válidos en PB_SBOCIMU: ${validCardCodes.size}`);
+
+    const validSalesPersons = [11, 32, 73, 116, 146];
+    const defaultSalesPerson = 146;
+
+    const asesorMap = {};
+    for (const asesor of asesorData) {
+      asesorMap[asesor.U_IDAsesor] = asesor;
+    }
+
+    const joinedData = [];
+    let matchedByName = 0;
+
+    for (const aca of acaData) {
+      let resolvedCardCode = aca.U_SAPCode;
+
+      if (validCardCodes.has(resolvedCardCode)) {
+        // CardCode directo encontrado
+      } else if (aca.U_RazonSocial) {
+        // Sin CardCode o no existe, buscar por razón social
+        const nameKey = aca.U_RazonSocial.trim().toUpperCase();
+        const foundCode = cardNameToCode[nameKey];
+        if (foundCode) {
+          resolvedCardCode = foundCode;
+          matchedByName++;
+        } else {
+          continue;
+        }
+      } else {
+        continue;
+      }
+
+      const matchingCM = cmData.filter((cm) => cm.U_IDACA === aca.U_IDACA);
+
+      for (const cm of matchingCM) {
+        const matchingMPC = mpcData.filter((mpc) => mpc.U_IDCM === cm.U_IDCM);
+
+        for (const mpc of matchingMPC) {
+          const asesor = asesorMap[aca.U_IDAsesor] || {};
+
+          const originalSalesPerson = asesor.U_SAPCode;
+          const mappedSalesPerson = validSalesPersons.includes(originalSalesPerson)
+            ? originalSalesPerson
+            : defaultSalesPerson;
+
+          joinedData.push({
+            T0_U_IDAsesor: aca.U_IDAsesor,
+            T0_U_Asesor: aca.U_Asesor,
+            T0_U_IDAgencia: aca.U_IDAgencia,
+            T0_U_Agencia: aca.U_Agencia,
+            T0_U_Cliente: aca.U_Cliente,
+            T0_U_RazonSocial: aca.U_RazonSocial,
+            T0_U_IDACA: aca.U_IDACA,
+            ACA_U_SAPCode: resolvedCardCode,
+            ASESOR_U_IDAsesor: asesor.U_IDAsesor || null,
+            ASESOR_U_Asesor: asesor.U_Asesor || null,
+            ASESOR_U_SAPCode: mappedSalesPerson,
+            ASESOR_U_SAPCode_Original: originalSalesPerson,
+            ASESOR_U_UnidadNegocio: asesor.U_UnidadNegocio || null,
+            T1_U_Cliente: cm.U_Cliente,
+            T1_U_IDACA: cm.U_IDACA,
+            T1_U_IDCM: cm.U_IDCM,
+            T1_U_IDMarca: cm.U_IDMarca,
+            T1_U_UnidadNegocio: cm.U_UnidadNegocio,
+            T1_U_ValidFrom: cm.U_ValidFrom,
+            T1_U_ValidTo: cm.U_ValidTo,
+            T2_U_IDCategoria: mpc.U_IDCategoria,
+            T2_U_Categoria: mpc.U_Categoria,
+            T2_U_IDCM: mpc.U_IDCM,
+            T2_U_IDProducto: mpc.U_IDProducto,
+            T2_U_Marca: mpc.U_Marca,
+            T2_U_Producto: mpc.U_Producto,
+            T2_U_ValidFrom: mpc.U_ValidFrom,
+            T2_U_ValidTo: mpc.U_ValidTo,
+            CUIC: mpc.U_IDMPC || mpc.Code || mpc.U_Code,
+            _testEnvironment: true,
+            _validForTest: true,
+          });
+        }
+      }
+    }
+
+    console.log(`? JOIN completado - ${joinedData.length} registros VÁLIDOS para PB_SBOCIMU (${matchedByName} encontrados por nombre)`);
+
+    const result = {
+      odata: {
+        context: "CUIC_TEST_RESULT",
+        environment: "PB_SBOCIMU",
+      },
+      value: joinedData,
+      totalRecords: joinedData.length,
+      metadata: {
+        validCardCodes: validCardCodes.size,
+        validSalesPersons: validSalesPersons.length,
+        filtered: true,
+        environment: "TEST"
+      }
+    };
+
+    res.json(result);
+  } catch (error) {
+    console.error("Error en /cuic-test:", error.message);
+
+    if (error.response?.status === 401) {
+      try {
+        await getSession("CATALOGOS_BI");
+        await getSession("PB_SBOCIMU");
+        return res.status(401).json({ error: "Sesión expirada, intenta nuevamente" });
+      } catch (retryError) {
+        console.error("Error en reintento CUIC-TEST:", retryError.message);
+      }
+    }
+
+    res.status(500).json({
+      error: "Error al obtener datos CUIC para PB_SBOCIMU",
+      details: error.response?.data || error.message,
+    });
+  }
+});
+
+// ?? CUIC TRADE (SBOIMUTRADE - productiva)
+app.get("/cuic-trade", async (req, res) => {
+  console.log("?? Accediendo a /cuic-trade (SBOIMUTRADE - productiva)...");
+
+  try {
+    if (!sessions.CATALOGOS_BI) {
+      await getSession("CATALOGOS_BI");
+    }
+
+    if (!sessions.SBOIMUTRADE) {
+      await getSession("SBOIMUTRADE");
+    }
+
+    console.log("?? Obteniendo datos de catálogos...");
+
+    const [acaResponse, cmResponse, mpcResponse, asesorResponse] = await Promise.all([
+      axios.get("https://10.1.0.9:50000/b1s/v1/BI_CRM_ACA", {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: sessions.CATALOGOS_BI,
+          Prefer: "odata.maxpagesize=0",
+        },
+        httpsAgent,
+      }),
+      axios.get("https://10.1.0.9:50000/b1s/v1/BI_CRM_CM", {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: sessions.CATALOGOS_BI,
+          Prefer: "odata.maxpagesize=0",
+        },
+        httpsAgent,
+      }),
+      axios.get("https://10.1.0.9:50000/b1s/v1/BI_CRM_MPC", {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: sessions.CATALOGOS_BI,
+          Prefer: "odata.maxpagesize=0",
+        },
+        httpsAgent,
+      }),
+      axios.get("https://10.1.0.9:50000/b1s/v1/BI_CRM_Asesor", {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: sessions.CATALOGOS_BI,
+          Prefer: "odata.maxpagesize=0",
+        },
+        httpsAgent,
+      }),
+    ]);
+
+    console.log("?? Obteniendo BusinessPartners válidos de SBOIMUTRADE...");
+
+    const bpResponse = await axios.get(
+      "https://10.1.0.9:50000/b1s/v2/BusinessPartners?$select=CardCode,CardName",
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: sessions.SBOIMUTRADE,
+          Prefer: "odata.maxpagesize=0",
+        },
+        httpsAgent,
+      }
+    );
+
+    const acaData = acaResponse.data.value || [];
+    const cmData = cmResponse.data.value || [];
+    const mpcData = mpcResponse.data.value || [];
+    const asesorData = asesorResponse.data.value || [];
+
+    const bpList = bpResponse.data.value || [];
+    const validCardCodes = new Set(bpList.map(bp => bp.CardCode));
+
+    // Mapa de CardName -> CardCode para buscar por nombre cuando U_SAPCode está vacío
+    const cardNameToCode = {};
+    for (const bp of bpList) {
+      if (bp.CardName) {
+        cardNameToCode[bp.CardName.trim().toUpperCase()] = bp.CardCode;
+      }
+    }
+
+    console.log(`? CardCodes válidos en SBOIMUTRADE: ${validCardCodes.size}`);
+
+    const validSalesPersons = [11, 32, 73, 116, 146];
+    const defaultSalesPerson = 146;
+
+    const asesorMap = {};
+    for (const asesor of asesorData) {
+      asesorMap[asesor.U_IDAsesor] = asesor;
+    }
+
+    const joinedData = [];
+    let matchedByName = 0;
+
+    for (const aca of acaData) {
+      let resolvedCardCode = aca.U_SAPCode;
+
+      if (validCardCodes.has(resolvedCardCode)) {
+        // CardCode directo encontrado
+      } else if (aca.U_RazonSocial) {
+        // Sin CardCode o no existe, buscar por razón social
+        const nameKey = aca.U_RazonSocial.trim().toUpperCase();
+        const foundCode = cardNameToCode[nameKey];
+        if (foundCode) {
+          resolvedCardCode = foundCode;
+          matchedByName++;
+        } else {
+          continue;
+        }
+      } else {
+        continue;
+      }
+
+      const matchingCM = cmData.filter((cm) => cm.U_IDACA === aca.U_IDACA);
+
+      for (const cm of matchingCM) {
+        const matchingMPC = mpcData.filter((mpc) => mpc.U_IDCM === cm.U_IDCM);
+
+        for (const mpc of matchingMPC) {
+          const asesor = asesorMap[aca.U_IDAsesor] || {};
+
+          const originalSalesPerson = asesor.U_SAPCode;
+          const mappedSalesPerson = validSalesPersons.includes(originalSalesPerson)
+            ? originalSalesPerson
+            : defaultSalesPerson;
+
+          joinedData.push({
+            T0_U_IDAsesor: aca.U_IDAsesor,
+            T0_U_Asesor: aca.U_Asesor,
+            T0_U_IDAgencia: aca.U_IDAgencia,
+            T0_U_Agencia: aca.U_Agencia,
+            T0_U_Cliente: aca.U_Cliente,
+            T0_U_RazonSocial: aca.U_RazonSocial,
+            T0_U_IDACA: aca.U_IDACA,
+            ACA_U_SAPCode: resolvedCardCode,
+            ASESOR_U_IDAsesor: asesor.U_IDAsesor || null,
+            ASESOR_U_Asesor: asesor.U_Asesor || null,
+            ASESOR_U_SAPCode: mappedSalesPerson,
+            ASESOR_U_SAPCode_Original: originalSalesPerson,
+            ASESOR_U_UnidadNegocio: asesor.U_UnidadNegocio || null,
+            T1_U_Cliente: cm.U_Cliente,
+            T1_U_IDACA: cm.U_IDACA,
+            T1_U_IDCM: cm.U_IDCM,
+            T1_U_IDMarca: cm.U_IDMarca,
+            T1_U_UnidadNegocio: cm.U_UnidadNegocio,
+            T1_U_ValidFrom: cm.U_ValidFrom,
+            T1_U_ValidTo: cm.U_ValidTo,
+            T2_U_IDCategoria: mpc.U_IDCategoria,
+            T2_U_Categoria: mpc.U_Categoria,
+            T2_U_IDCM: mpc.U_IDCM,
+            T2_U_IDProducto: mpc.U_IDProducto,
+            T2_U_Marca: mpc.U_Marca,
+            T2_U_Producto: mpc.U_Producto,
+            T2_U_ValidFrom: mpc.U_ValidFrom,
+            T2_U_ValidTo: mpc.U_ValidTo,
+            CUIC: mpc.U_IDMPC || mpc.Code || mpc.U_Code,
+            _tradeEnvironment: true,
+            _validForTrade: true,
+          });
+        }
+      }
+    }
+
+    console.log(`? JOIN completado - ${joinedData.length} registros VÁLIDOS para SBOIMUTRADE (${matchedByName} encontrados por nombre)`);
+
+    const result = {
+      odata: {
+        context: "CUIC_TRADE_RESULT",
+        environment: "SBOIMUTRADE",
+      },
+      value: joinedData,
+      totalRecords: joinedData.length,
+      metadata: {
+        validCardCodes: validCardCodes.size,
+        validSalesPersons: validSalesPersons.length,
+        filtered: true,
+        environment: "TRADE"
+      }
+    };
+
+    res.json(result);
+  } catch (error) {
+    console.error("Error en /cuic-trade:", error.message);
+
+    if (error.response?.status === 401) {
+      try {
+        await getSession("CATALOGOS_BI");
+        await getSession("SBOIMUTRADE");
+        return res.status(401).json({ error: "Sesión expirada, intenta nuevamente" });
+      } catch (retryError) {
+        console.error("Error en reintento CUIC-TRADE:", retryError.message);
+      }
+    }
+
+    res.status(500).json({
+      error: "Error al obtener datos CUIC para SBOIMUTRADE",
+      details: error.response?.data || error.message,
+    });
+  }
+});
+
+app.get("/articulos", async (req, res) => {
+  console.log("?? Accediendo a /articulos...");
+  
+  const cachedData = getCache('articulos');
+  if (cachedData) {
+    return res.json(cachedData);
+  }
+  
+  try {
+    if (!sessions.SBOCIMU) {
+      await getSession("SBOCIMU");
+    }
+
+    const url = "https://10.1.0.9:50000/b1s/v1/Items?$select=ItemCode,ItemName,U_IMU_OcrCode,U_IMU_OcrName,U_IMU_CodTAsig,U_IMU_DscTAsig,U_IMU_cod_sitio,U_IMU_dscSitio,U_IMU_Ubicacion,U_IMU_Referencia,U_CRM_BonRel,U_IMU_PublicPrice,ItemPrices";
+
+    const { data } = await axios.get(url, {
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: sessions.SBOCIMU,
+        Prefer: "odata.maxpagesize=0",
+      },
+      httpsAgent,
+    });
+
+    setCache('articulos', data);
+    
+    res.json(data);
+  } catch (error) {
+    console.error("Error en /articulos:", error.message);
+
+    if (cache.articulos?.data) {
+      console.log(`?? VPN caída, devolviendo caché antiguo`);
+      return res.json(cache.articulos.data);
+    }
+
+    if (error.response?.status === 401) {
+      try {
+        await getSession("SBOCIMU");
+        const url = "https://10.1.0.9:50000/b1s/v1/Items?$select=ItemCode,ItemName,U_IMU_OcrCode,U_IMU_OcrName,U_IMU_CodTAsig,U_IMU_DscTAsig,U_IMU_cod_sitio,U_IMU_dscSitio,U_IMU_Ubicacion,U_IMU_Referencia,U_CRM_BonRel,U_IMU_PublicPrice,ItemPrices";
+        const { data } = await axios.get(url, {
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: sessions.SBOCIMU,
+            Prefer: "odata.maxpagesize=0",
+          },
+          httpsAgent,
+        });
+        setCache('articulos', data);
+        return res.json(data);
+      } catch (retryError) {
+        console.error("Error en reintento:", retryError.message);
+      }
+    }
+
+    res.status(500).json({ error: "Error al obtener artículos" });
+  }
+});
+
+app.get("/articulos-trade", async (req, res) => {
+  console.log("?? Accediendo a /articulos-trade...");
+
+  const cachedData = getCache('articulos-trade');
+  if (cachedData) {
+    return res.json(cachedData);
+  }
+
+  try {
+    if (!sessions.SBOIMUTRADE) {
+      await getSession("SBOIMUTRADE");
+    }
+
+    const url = "https://10.1.0.9:50000/b1s/v2/Items?$select=ItemCode,ItemName,U_IMU_OcrCode,U_IMU_OcrName,U_IMU_CodTAsig,U_IMU_DscTAsig,U_IMU_cod_sitio,U_IMU_dscSitio,U_IMU_Ubicacion,U_IMU_Referencia,U_CRM_BonRel,U_IMU_PublicPrice,ItemPrices";
+
+    const { data } = await axios.get(url, {
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: sessions.SBOIMUTRADE,
+        Prefer: "odata.maxpagesize=0",
+      },
+      httpsAgent,
+    });
+
+    setCache('articulos-trade', data);
+
+    res.json(data);
+  } catch (error) {
+    console.error("Error en /articulos-trade:", error.message);
+
+    if (cache['articulos-trade']?.data) {
+      console.log(`?? VPN caída, devolviendo caché antiguo`);
+      return res.json(cache['articulos-trade'].data);
+    }
+
+    if (error.response?.status === 401) {
+      try {
+        await getSession("SBOIMUTRADE");
+        const url = "https://10.1.0.9:50000/b1s/v2/Items?$select=ItemCode,ItemName,U_IMU_OcrCode,U_IMU_OcrName,U_IMU_CodTAsig,U_IMU_DscTAsig,U_IMU_cod_sitio,U_IMU_dscSitio,U_IMU_Ubicacion,U_IMU_Referencia,U_CRM_BonRel,U_IMU_PublicPrice,ItemPrices";
+        const { data } = await axios.get(url, {
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: sessions.SBOIMUTRADE,
+            Prefer: "odata.maxpagesize=0",
+          },
+          httpsAgent,
+        });
+        setCache('articulos-trade', data);
+        return res.json(data);
+      } catch (retryError) {
+        console.error("Error en reintento:", retryError.message);
+      }
+    }
+
+    res.status(500).json({ error: "Error al obtener artículos TRADE" });
+  }
+});
+
+// ?? GET Order by DocNum (para obtener DocEntry)
+app.get("/order-by-docnum/:db/:docnum", async (req, res) => {
+  const { db, docnum } = req.params;
+  const validDbs = ["SBOCIMU", "PB_SBOCIMU", "SBOIMUTRADE", "PB_SBOIMUTRADE"];
+  if (!validDbs.includes(db)) {
+    return res.status(400).json({ error: "DB inválida" });
+  }
+
+  console.log(`?? GET /order-by-docnum/${db}/${docnum}...`);
+
+  try {
+    if (!sessions[db]) {
+      await getSession(db);
+    }
+
+    const apiVersion = (db === "PB_SBOIMUTRADE" || db === "SBOIMUTRADE") ? "v2" : "v1";
+    const url = `https://10.1.0.9:50000/b1s/${apiVersion}/Orders?$filter=DocNum eq ${docnum}&$select=DocEntry,DocNum,DocumentLines`;
+    const { data } = await axios.get(url, {
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: sessions[db],
+      },
+      httpsAgent,
+    });
+
+    if (!data.value || data.value.length === 0) {
+      return res.status(404).json({ error: `Order con DocNum ${docnum} no encontrada en ${db}` });
+    }
+
+    const order = data.value[0];
+    res.json({
+      DocEntry: order.DocEntry,
+      DocNum: order.DocNum,
+      DocumentLines: (order.DocumentLines || []).map(l => ({
+        LineNum: l.LineNum,
+        ItemCode: l.ItemCode,
+      })),
+    });
+  } catch (error) {
+    console.error("? Error:", error.message);
+
+    if (error.response?.status === 401) {
+      try {
+        await getSession(db);
+        const apiVersion = (db === "PB_SBOIMUTRADE" || db === "SBOIMUTRADE") ? "v2" : "v1";
+        const url = `https://10.1.0.9:50000/b1s/${apiVersion}/Orders?$filter=DocNum eq ${docnum}&$select=DocEntry,DocNum,DocumentLines`;
+        const { data } = await axios.get(url, {
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: sessions[db],
+          },
+          httpsAgent,
+        });
+
+        if (!data.value || data.value.length === 0) {
+          return res.status(404).json({ error: `Order con DocNum ${docnum} no encontrada en ${db}` });
+        }
+
+        const order = data.value[0];
+        return res.json({
+          DocEntry: order.DocEntry,
+          DocNum: order.DocNum,
+          DocumentLines: (order.DocumentLines || []).map(l => ({
+            LineNum: l.LineNum,
+            ItemCode: l.ItemCode,
+          })),
+        });
+      } catch (retryError) {
+        console.error("? Error en reintento:", retryError.message);
+      }
+    }
+
+    res.status(error.response?.status || 500).json({ error: "Error al buscar Order", details: error.response?.data || error.message });
+  }
+});
+
+// ?? POST PRODUCCIÓN
+app.post("/delivery-notes", async (req, res) => {
+  console.log("?? POST /delivery-notes (PRODUCCIÓN - SBOCIMU)...");
+
+  try {
+    if (!sessions.SBOCIMU) {
+      await getSession("SBOCIMU");
+    }
+
+    const url = "https://10.1.0.9:50000/b1s/v1/DeliveryNotes";
+
+    const { data } = await axios.post(url, req.body, {
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: sessions.SBOCIMU,
+      },
+      httpsAgent,
+    });
+
+    console.log("? DeliveryNote creado en PRODUCCIÓN");
+    res.json({
+      success: true,
+      environment: "SBOCIMU",
+      message: "DeliveryNote creado exitosamente",
+      data: data,
+    });
+  } catch (error) {
+    console.error("? Error:", error.message);
+
+    if (error.response?.status === 401) {
+      try {
+        await getSession("SBOCIMU");
+        const url = "https://10.1.0.9:50000/b1s/v1/DeliveryNotes";
+        const { data } = await axios.post(url, req.body, {
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: sessions.SBOCIMU,
+          },
+          httpsAgent,
+        });
+
+        return res.json({
+          success: true,
+          environment: "SBOCIMU",
+          message: "DeliveryNote creado exitosamente",
+          data: data,
+        });
+      } catch (retryError) {
+        console.error("? Error en reintento:", retryError.message);
+      }
+    }
+
+    res.status(error.response?.status || 500).json({
+      success: false,
+      environment: "SBOCIMU",
+      error: "Error al crear DeliveryNote",
+      details: error.response?.data || error.message,
+    });
+  }
+});
+
+// ?? POST TEST
+app.post("/delivery-notes-test", async (req, res) => {
+  console.log("?? POST /delivery-notes-test (PB_SBOCIMU)...");
+
+  try {
+    if (!sessions.PB_SBOCIMU) {
+      await getSession("PB_SBOCIMU");
+    }
+
+    const url = "https://10.1.0.9:50000/b1s/v1/DeliveryNotes";
+
+    const { data } = await axios.post(url, req.body, {
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: sessions.PB_SBOCIMU,
+      },
+      httpsAgent,
+    });
+
+    console.log("? DeliveryNote creado en PB_SBOCIMU");
+    res.json({
+      success: true,
+      environment: "PB_SBOCIMU",
+      message: "DeliveryNote creado exitosamente",
+      data: data,
+    });
+  } catch (error) {
+    console.error("? Error:", error.message);
+
+    if (error.response?.status === 401) {
+      try {
+        await getSession("PB_SBOCIMU");
+        const url = "https://10.1.0.9:50000/b1s/v1/DeliveryNotes";
+        const { data } = await axios.post(url, req.body, {
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: sessions.PB_SBOCIMU,
+          },
+          httpsAgent,
+        });
+
+        return res.json({
+          success: true,
+          environment: "PB_SBOCIMU",
+          message: "DeliveryNote creado exitosamente",
+          data: data,
+        });
+      } catch (retryError) {
+        console.error("? Error en reintento:", retryError.message);
+      }
+    }
+
+    res.status(error.response?.status || 500).json({
+      success: false,
+      environment: "PB_SBOCIMU",
+      error: "Error al crear DeliveryNote",
+      details: error.response?.data || error.message,
+    });
+  }
+});
+
+// ?? POST TRADE
+app.post("/delivery-notes-trade", async (req, res) => {
+  console.log("?? POST /delivery-notes-trade (PRODUCCIÓN - SBOIMUTRADE)...");
+
+  try {
+    if (!sessions.SBOIMUTRADE) {
+      await getSession("SBOIMUTRADE");
+    }
+
+    const url = "https://10.1.0.9:50000/b1s/v2/DeliveryNotes";
+
+    const { data } = await axios.post(url, req.body, {
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: sessions.SBOIMUTRADE,
+      },
+      httpsAgent,
+    });
+
+    console.log("? DeliveryNote creado en SBOIMUTRADE");
+    res.json({
+      success: true,
+      environment: "SBOIMUTRADE",
+      message: "DeliveryNote creado exitosamente",
+      data: data,
+    });
+  } catch (error) {
+    console.error("? Error:", error.message);
+
+    if (error.response?.status === 401) {
+      try {
+        await getSession("SBOIMUTRADE");
+        const url = "https://10.1.0.9:50000/b1s/v2/DeliveryNotes";
+        const { data } = await axios.post(url, req.body, {
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: sessions.SBOIMUTRADE,
+          },
+          httpsAgent,
+        });
+
+        return res.json({
+          success: true,
+          environment: "SBOIMUTRADE",
+          message: "DeliveryNote creado exitosamente",
+          data: data,
+        });
+      } catch (retryError) {
+        console.error("? Error en reintento:", retryError.message);
+      }
+    }
+
+    res.status(error.response?.status || 500).json({
+      success: false,
+      environment: "SBOIMUTRADE",
+      error: "Error al crear DeliveryNote",
+      details: error.response?.data || error.message,
+    });
+  }
+});
+
+app.listen(3000, "0.0.0.0", () => {
+  console.log("? Server corriendo en http://localhost:3000");
+  console.log("");
+  console.log("?? ENDPOINTS DISPONIBLES:");
+  console.log("");
+  console.log("?? PRODUCCIÓN (SBOCIMU):");
+  console.log("   GET  /cuic");
+  console.log("   POST /delivery-notes");
+  console.log("");
+  console.log("?? TEST (PB_SBOCIMU):");
+  console.log("   GET  /cuic-test");
+  console.log("   POST /delivery-notes-test");
+  console.log("");
+  console.log("?? TRADE (PB_SBOIMUTRADE):");
+  console.log("   GET  /cuic-trade");
+  console.log("   POST /delivery-notes-trade");
+  console.log("");
+  console.log("?? OTROS:");
+  console.log("   GET  /articulos");
+  console.log("   GET  /api/ACA | /api/CM | /api/MPC | /api/ASESOR");
+  console.log("   GET  /cache-status");
+  console.log("   GET  /clear-cache");
+});

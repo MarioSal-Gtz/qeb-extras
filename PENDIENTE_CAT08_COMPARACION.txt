@@ -1,0 +1,37 @@
+===============================================================================
+PENDIENTE: Comparación Cat 08 - Datos migrados vs Excel de Orden de Montaje
+Fecha: 8 abril 2026
+===============================================================================
+
+## PROBLEMA
+Al comparar el excel "Orden de Montaje CAT08 - 2026 APS GLOBALES" contra la BD
+de producción, se encontraron 119 discrepancias de 175 filas "CARGADA EN QEB".
+
+## DETALLE
+- 60 "NO EXISTEN EN BD": filas BF/IN/CT que en el excel son líneas separadas
+  pero en QEB se consolidaron dentro de la fila RT como bonificación durante
+  la migración. No faltan datos, están consolidadas diferente.
+- 36 caras/bonif mal: cantidades no coinciden (ej: Sanborns Acapulco:
+  excel dice RT=2, BD dice RT=4 porque incluyó las BF/IN como renta)
+- 10 tarifa mal: consecuencia de la consolidación
+- 48 costo mal: consecuencia de tener más caras de las que deberían ser renta
+
+## CAUSA RAÍZ
+El script de migración (migrate_campaigns.py) consolidó las filas del CSV
+original en una sola solicitudCaras por artículo+catorcena. Las filas BF/IN
+no se crearon como registros separados con su propio artículo (BF-xxx, IN-xxx),
+sino que se sumaron a las caras de RT.
+
+El fill_csv_from_sap.py sí trajo correctamente los artículos y precios de SAP,
+pero el CSV original de Cat08-26 ya venía con las filas como "RENTA" sin
+diferenciar BF/IN, y la migración las consolidó así.
+
+## ARCHIVOS
+- Excel de referencia: Downloads/Orden de Montaje CAT08 - 2026 APS GLOBALES - Previa (1).xlsx
+- CSV resultado comparación: Downloads/comparacion_cat08_resultado.csv
+- Script de comparación: extras/scripts/compare_cat08.js
+
+## PENDIENTE
+- Decidir si corregir los datos en BD (partir las filas RT en RT+BF+IN)
+- Las filas "NUEVA" del excel son campañas que aún no están en QEB
+- Revisar si el mismo problema aplica para Cat 09-26

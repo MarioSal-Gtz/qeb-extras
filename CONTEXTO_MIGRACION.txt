@@ -1,0 +1,672 @@
+===============================================================================
+CONTEXTO DE MIGRACION QEB - Cat 02 a Cat 26
+Fecha: Abril 2026 (actualizado 7 abril 2026)
+===============================================================================
+
+## RESUMEN GENERAL
+- Migrar campanas de INVIAN a QEB desde Cat 02 hasta Cat 26
+- Cat 02-07: CSV unificado con datos corregidos de inventario + USUARIOS
+- Cat 08-26: CSV con DIDI + usuarios + asignados + datos corregidos
+- Migracion corrida en produccion (DigitalOcean) el 5 abril 2026
+
+## ARCHIVOS PRINCIPALES
+
+### CSVs listos para cargar:
+- extras/listos-para-cargar/Layout QEB - Cat02-Cat07 - UNIFICADO.csv
+  -> CSV unificado de Cat 2 a 7
+  -> Formato, Estado, Ciudad corregidos desde BD de inventario
+  -> NSE real del inventario
+  -> 110,731 filas (110,196 con inventario matcheado)
+  -> AHORA INCLUYE: usuario_id, nombre_usuario, asignado, id_asignado
+  -> has_users = True en el script
+
+- extras/listos-para-cargar/Layout QEB - Cat08-Cat26 - FILLED - CON DIDI - USUARIOS.csv
+  -> CSV de Cat 8 a 26 CON campana DIDI incluida
+  -> Columnas extra: usuario_id, nombre_usuario, asignado, id_asignado, Formato, Estado, NSE
+  -> 51,415 filas (51,415 con inventario matcheado)
+  -> 558 articulos vacios corregidos (Jalisco: GD, PV)
+  -> Inventario de DIDI NO se duplica: las campanas originales que tenian
+     inventario que DIDI ocupa, lo conservan en caras esperadas pero NO se
+     crea la reserva. Asi quedan "incompletas" para que un usuario asigne otro.
+
+### CSV de usuarios generado:
+- migracion/Layout_QEB_con_usuarios.csv
+  -> CSV original de Cat06-Cat26 con columnas usuario_id y nombre_usuario agregadas
+  -> Match fuzzy de vendedor del CSV contra tabla usuario de produccion
+  -> 62,383 matcheados, 266,162 sin vendedor (filas vacias)
+
+### Script de migracion:
+- extras/scripts/migrate_campaigns.py
+  -> Ahora apunta a BD de produccion (DigitalOcean)
+  -> has_users = True para AMBOS CSVs (Cat 2-7 y Cat 8-26)
+  -> Agrupa por APS Global (cada APS unico = una campana)
+  -> AUTO_INCREMENT arranca en 80000
+  -> Cuando APS es valido, lo usa como ID de solicitud/propuesta/cotizacion/campania
+  -> Cuando no hay APS, usa auto-increment
+  -> Maneja articulos: RT=Renta, CT=Cortesia, BF/CF=Bonificacion, IN=Intercambio
+  -> Cat 8-26: inserta usuario_id, nombre_usuario, asignado, id_asignado
+  -> Cat 2-7: AHORA TAMBIEN inserta usuarios del CSV
+  -> Propuesta guarda descripcion (nombre campana) y notas (migracion)
+  -> NSE real del inventario en solicitudCaras (no "Todos")
+  -> Formato real del inventario (no hardcoded "MUPI")
+  -> DIDI inventory skip
+  -> Barra de progreso por catorcena
+
+### SQL de borrado migracion:
+- extras/scripts/delete_migration_prod.sql
+  -> Borra SOLO datos migrados (notas LIKE '%Migracion%')
+  -> NO toca datos creados por usuarios
+  -> Orden: reservas -> solicitudCaras -> campanias -> cotizaciones -> historial -> propuestas -> solicitudes
+  -> Requiere USE u658050396_QEB al inicio
+
+### SQL de reset (pruebas):
+- extras/scripts/reset_database.sql
+  -> Limpia todas las tablas transaccionales
+  -> Conserva: catorcenas, cliente, criterios_autorizacion, equipo,
+     espacio_inventario, inventarios, usuario, usuario_equipo, proveedores
+
+## CAMPANA DIDI
+
+### Datos:
+- Campana: "DiDi / RIDES Zonas - planta fija"
+- APS: 70915, CUIC: 11131
+- Anunciante: DIDI
+- Vendedor: ALDONZA OJEDA POIRE
+- Periodo: Cat 7 a Cat 26 (Cat 7 viene del CSV de validacion, Cat 8-26 del FILLED)
+- Precio: $3,965 por cara
+- 90 inventarios (89 claves + DF3527 Contraflujo)
+- 70 PARABUS (RT-P1-COB-MX) + 20 COLUMNA (RT-CL-COB-MX)
+- Todos en Ciudad de Mexico
+
+### Archivos DIDI:
+- extras/didi/Oocupacion de QEB para DIDI 2026 OBSERVACIONES.xlsx - Hoja1.csv
+- extras/didi/Layout QEB - DIDI Cat08-Cat26 - CORRECTED.csv
+- extras/didi/Layout QEB - DIDI Cat08-Cat26 - VIEJO.csv (NO USAR)
+- extras/didi/Layout QEB - Cat08-Cat26 - SIN DIDI.csv (ya no se usa)
+
+## USUARIOS Y ASIGNADOS
+
+### Logica:
+1. Del campo "Vendedor" del CSV, se busca el match en tabla usuario (por nombre fuzzy)
+2. El match da el usuario_id y nombre_usuario (creador de la solicitud)
+3. Con el usuario_id, se buscan sus equipos (tabla usuario_equipo)
+4. De cada equipo, se extraen miembros con roles:
+   - Analista de Servicio al Cliente
+   - Asesor Analista
+   - Disenadores
+5. Esos miembros son los "asignados" (con sus IDs y nombres)
+6. EL USUARIO TAMBIEN APARECE EN SUS PROPIOS ASIGNADOS (agregado post-migracion)
+
+### Vendedores matcheados (20 de 20, mismos para Cat 2-7 y Cat 8-26):
+- ALDO TAVERA -> 1057613 Aldo Adrian Tavera Gil
+- ALDONZA OJEDA POIRE -> 1057610 Aldonza Ojeda Poire
+- ALEJANDRO HERRERA -> 1057624 Alejandro Isaac Herrera Reyes
+- ANA MARIA LOPEZ -> 1057608 Ana Maria Lopez Gonzalez
+- BEGONA BEORLEGUI -> 1057619 Maria Begona Beorlegui Estevez
+- BRISSA GONZALEZ -> 1057681 Brissa Nayeli Gonzalez Heras
+- DULCE BALTIERRA -> 1057627 Dulce Rocio Baltierra Leal
+- EDNA GONZALEZ LABASTIDA -> 1057614 Edna Jasiel Gonzalez Labastida
+- ESTRELLA NANDO BEHAR -> 1057615 Estrella Nando Behar
+- FERNANDA MEJIA SANCHEZ -> 1057609 Maria Fernanda Mejia Sanchez
+- HILDA LETICIA LINA -> 1057623 Hilda Leticia Linas Gutierrez
+- JOAQUIN CALDERON -> 1057618 Joaquin Fernando Calderon Ramirez
+- KARLA BASURTO -> 1057689 KARLA BASURTO MICHELENA
+- LEONOR BARRANON -> 1057607 Leonor Barranon Reyes
+- LISSET VALDEZ -> 1057617 Lissett Valdez Lopez
+- MONICA SOFIA SANCHEZ -> 1057626 Monica Sofia Sanchez Ruiz
+- NOEMI MUNOZ -> 1057620 Noemi Guadalupe Munoz Perez
+- SARA PICHARDO -> 1057612 Sara Pichardo Guzman
+- VALERIA TOSTADO -> 1057611 Valeria Tostado Ibanez
+- VICTOR MENDIOLA -> 1057622 Victor Rolando Mendiola Tello
+
+## CORRECCIONES APLICADAS A LOS CSVs
+
+### Formato/Mueble:
+- Antes: hardcoded "MUPI" en solicitudCaras
+- Ahora: real del inventario (Parabus, Columna, etc.)
+
+### Ciudad/Estado:
+- Antes: "Ciudad de Mexico" como ciudad (era la plaza)
+- Ahora: municipio real (BENITO JUAREZ, COYOACAN, etc.) y estado real
+
+### NSE:
+- Antes: "Todos"
+- Ahora: real del inventario (ABC+, CD, DE)
+
+### Articulos vacios (558 filas):
+- 498 filas Guadalajara/Zapopan/San Pedro Tlaquepaque -> RT-P1-COB-GD
+- 60 filas Puerto Vallarta -> RT-P1-COB-PV
+
+## BUGS ENCONTRADOS Y ARREGLADOS
+
+### solicitud_id = 0 en propuestas:
+- Cuando se usa APS como ID (INSERT con ID explicito), cursor.lastrowid
+  devuelve 0 en vez del APS. Se arreglo usando aps_val directamente.
+
+### Articulos erroneos en produccion (solicitud 80046, 80035, 80077):
+- Se actualizaron directamente en BD de produccion
+- CF-0015 -> RT-P2-COB-AC, CF-0016 -> RT-P2-COB-OX, etc.
+
+### nombre_usuario mal en solicitudes migradas:
+- Antes: ponia el nombre del vendedor del CSV en mayusculas (ej: "ANA MARIA LOPEZ")
+- Ahora: pone el nombre real del usuario de la BD (ej: "Ana Maria Lopez Gonzalez")
+- Se corrigio el CSV de Cat 2-7 para incluir usuario_id y nombre_usuario
+- Se actualizo la BD directamente para las 34 solicitudes de pruebas
+- En produccion se corrigio post-migracion
+
+### Usuario no aparecia en sus asignados:
+- Post-migracion en produccion: se actualizo solicitud.asignado e id_asignado
+  para incluir al usuario (nombre_usuario) como primer asignado
+- 325 solicitudes y 325 propuestas actualizadas
+- Las 100 restantes ya lo tenian incluido
+
+### Campanas migradas marcadas como posted_to_sap:
+- 425 campanas migradas se marcaron con posted_to_sap = 1
+- Asi el frontend no muestra boton de POST a SAP para campanas migradas
+- Las 86 campanas de usuarios siguen en posted_to_sap = 0
+
+### Caras RT con costo 0 (25 caras):
+- Articulos: RT-P1-COB-MY (1), RT-P1-COB-GD (22), RT-P1-COB-PV (2)
+- Causa: CSV original no tenia precio en esas filas
+- Solucion pendiente: necesita acceso a SAP via VPN (FortiClient)
+  para correr fill_csv_from_sap.py y obtener precios reales
+- Script de fill: extras/scripts/fill_csv_from_sap.py
+
+## BASE DE DATOS
+
+### Produccion (DigitalOcean):
+- Host: qeb-mysql-prod-do-user-32408772-0.g.db.ondigitalocean.com
+- Port: 25060
+- User: doadmin
+- Password: AVNS_GUPCVh6o1ZSAOK0EL0J
+- DB: u658050396_QEB
+- SSL: required
+- SSL cert: C:\Users\Mario\Downloads\ca-certificate.crt
+- Trusted Sources: agregar IP publica para acceder
+- Columnas varchar ampliadas a 255 o TEXT por MySQL 8 strict mode
+- Importada desde Hostinger el 30 marzo 2026
+
+### Pruebas (Hostinger):
+- Host: srv1978.hstgr.io
+- Port: 3306
+- User: u658050396_QEB_PRUEBAS
+- Password: /uQ3FCrLG5:6
+- DB: u658050396_QEB_PRUEBAS
+
+### Produccion antigua (Hostinger - YA NO SE USA):
+- Host: srv1978.hstgr.io
+- Port: 3306
+- User: u658050396_QEB
+- Password: QEBdevelop.1
+- DB: u658050396_QEB
+
+## MIGRACION EN PRODUCCION (5 abril 2026)
+
+### Proceso:
+1. Se borraron datos migrados anteriores (385 solicitudes, 385 propuestas,
+   385 campanias, 385 cotizaciones, 2630 solicitudCaras)
+   - Identificados por solicitud.notas LIKE '%Migracion%'
+   - Datos de usuarios (79 solicitudes, 86 campanias) NO se tocaron
+2. Se corrio migrate_campaigns.py apuntando a DigitalOcean
+3. Post-migracion:
+   - Se marcaron 425 campanias como posted_to_sap = 1
+   - Se agrego usuario al listado de asignados (325 solicitudes + propuestas)
+
+### Borrado en batches:
+- Las reservas (131K+) se borraron en batches de 5000 por timeout
+- Orden de borrado: reservas -> solicitudCaras -> campanias -> cotizaciones
+  -> historial -> propuestas -> solicitudes
+
+## CAMBIOS DE CODIGO HECHOS EN ESTA SESION
+
+### Backend (back):
+
+#### DG Contaminacion:
+- crearTareasAutorizacion: ya no requiere propuestaId para contaminar
+- Contamination works without propuestaId for solicitudes
+
+#### Inventarios:
+- getDisponibles: busca por municipio en vez de plaza para ciudad
+- getFormatosByCiudad: busca por municipio en vez de plaza
+- bulkCheck: agrega nombre de campana para inventarios ocupados
+  (JOIN campania via cotizacion_id, usa camp.nombre)
+- Columnas varchar ampliadas a 255 o TEXT en DigitalOcean
+
+#### Dashboard:
+- filter-options: ciudades devuelven {ciudad, estado} para cascada
+- formatos devuelven {formato, estado, ciudad} para cascada
+- nses devuelven {nse, estado, ciudad} para cascada
+
+#### Propuestas:
+- getFullDetails: busca cliente por CUIC en vez de por cliente_id
+  (fix "SPRING AIR" en PDF cuando cliente_id apunta al registro equivocado)
+- getPublicDetails: mismo fix de busqueda por CUIC
+- updateCara: skip authorization recalculation cuando solo cambia ciudad/NSE
+  (mismo fix que ya tenia campanas)
+
+#### Clientes:
+- getSAPClientesByDatabase: filtra CUICs solo por misma database
+  (cliente de TRADE ya no desaparece de tab CIMU)
+
+#### Autorizacion:
+- Articulos IM con tarifa 0 requieren autorizacion DCM
+- Articulos IM con tarifa > 0 siguen aprobados automaticamente
+
+#### Solicitudes:
+- Articulos erroneos actualizados en produccion (80046, 80035, 80077)
+- Solicitudes 80050/52/55/42/45: usuario_id y nombre corregidos multiples veces
+- Solicitudes 80041/44: usuario_id y nombre corregidos
+
+### Frontend (front):
+
+#### Solicitudes - CreateSolicitudModal:
+- Impar check per group (no global total) + DG contamination on data level
+- Recalculate DG contamination from original values on every edit
+  (_originalDg, _originalDcm fields)
+- DG contamination no override already-approved caras
+- Impar message per-group en footer
+- Catorcena range creates one cara per catorcena (no una sola)
+- Articulos IM pueden tener tarifa publica 0
+
+#### Notificaciones:
+- Tarifa publica column added to authorization task table
+- Tarifa tooltip uses per-group esImpar
+
+#### Inventarios:
+- Bulk upload: loading spinner, error/ok tabs with pagination (50 por pagina)
+- Bulk check: 3 tabs (nuevos/sobreescribibles/ocupados) con paginacion
+- CSV download buttons para cada tab
+- Occupied items show campaign name
+- Sin columna tarifa en preview table
+- overscroll-contain en modal
+
+#### Propuestas - AssignInventarioModal:
+- Download template CSV button next to upload
+- All users shown in campaign assignees (not just team)
+
+#### Campanas:
+- CampanaDetailPage: contacto usa creador_nombre (solicitud.nombre_usuario)
+- CampanasPage: filtro "Incompleta" en status de campanas
+- CampanaDetailPage: APS bloqueado para grupos incompletos (pendiente de subir)
+- AssignInventarioCampanaModal: asignados muestra todos los usuarios
+
+#### Dashboard:
+- Cascade filters: estado -> ciudad -> formato -> NSE (domino)
+- Al cambiar estado se limpian ciudad/formato/NSE
+
+## CAMBIOS ADICIONALES (7 abril 2026)
+
+### SAP Integration:
+
+#### VPS (QEB-SAP.txt):
+- Nuevo endpoint /articulos-trade: consulta SBOIMUTRADE (v2) para Items
+  con U_IMU_OcrCode correcto de TRADE (cache articulos-trade, 7 dias)
+- /delivery-notes-trade: ahora apunta a SBOIMUTRADE (produccion)
+  en vez de PB_SBOIMUTRADE (pruebas)
+- /delivery-notes: sigue apuntando a SBOCIMU (produccion CIMU)
+- /delivery-notes-test: apunta a PB_SBOCIMU (pruebas CIMU)
+
+#### Frontend SAP:
+- environmentStore: CIMU usa /delivery-notes (produccion), no /delivery-notes-test
+- environmentStore: TRADE articulos usa /articulos-trade
+- CampanaDetailPage: obtiene articulosMap de la BD correcta (campana.sap_database)
+  en vez del environment del store
+- SalesPersonCode: usa campana.salesperson_code (real) para CIMU,
+  siempre -1 para TRADE
+- CostingCode: ahora obtiene U_IMU_OcrCode correcto por sociedad SAP
+
+#### Errores SAP resueltos:
+- "Linked value 02-04-05 does not exist": CostingCode de CIMU usado en TRADE
+  -> Fix: endpoint separado /articulos-trade
+- "Invalid BP code TRADE00087": CardCode no existe en produccion SBOIMUTRADE
+  -> Tema de SAP, no de codigo
+- "No matching records found": mismo problema de CardCode
+
+#### Cambios manuales en BD produccion:
+- Solicitud 80086 (campana Qardeal #80076): salesperson_code cambiado a 62
+
+### Backend adicional:
+
+#### Campanas:
+- Fix TS error: parseInt(as string) -> Number() en catorcena params (linea 116-117)
+  Causaba build failure en DigitalOcean
+- Codigo de Akary: recalculo de inversion por catorcena filtrada (campanas, propuestas, solicitudes)
+
+#### Propuestas:
+- CSV export ahora coincide con columnas de la tabla:
+  ID, Fecha Creación, Marca, Creador, Campaña, Asignados, Inversión, Inicio, Fin, Estatus
+- updateCara: skip auth recalc cuando solo cambia ciudad/NSE
+
+#### Autorizacion:
+- IM con tarifa 0: requiere DCM
+- IM con tarifa > 0: aprobado automatico
+- Frontend: permite tarifa publica 0 para articulos IM
+
+### Frontend adicional:
+
+#### Campanas:
+- CSV export coincide con columnas de tabla + BOM para acentos:
+  ID, Periodo, Creador, Campaña, Marca, Estatus, Actividad, Fecha Inicio, Fecha Fin, APS
+- Filtro "Incompleta" en status: detecta campanas con reservas < caras esperadas
+- APS bloqueado para grupos incompletos (alert con detalle del grupo)
+- Contacto usa creador_nombre (solicitud.nombre_usuario) en vez de cotizacion.contacto
+- AssignInventarioCampanaModal: asignados muestra TODOS los usuarios (no solo equipo)
+
+#### Propuestas:
+- AssignInventarioModal: boton de descarga plantilla CSV junto a "Subir CSV"
+
+#### Autorizacion propuesta 80123:
+- DG rechazo las caras 3406, 3407, 3408, 3409, 3410
+- Caras rechazadas: RT-P1-COB-MY (0 caras), RT-P1-DIG-MY, RT-DIG-04-MX x3
+
+### Caras RT con costo 0 (25 caras) - PENDIENTE:
+- Articulos: RT-P1-COB-MY (1), RT-P1-COB-GD (22), RT-P1-COB-PV (2)
+- Causa: CSV original no tenia precio en esas filas
+- Necesita VPN (FortiClient) para correr fill_csv_from_sap.py
+- FortiClient: servicio FA_Scheduler, reiniciar si no conecta
+- Sin VPN no se pueden obtener precios reales de SAP
+
+## CAMBIOS SESION 7 ABRIL 2026
+
+### Bug caras_flujo + caras_contraflujo != caras (335 caras):
+- Causa: script migracion contaba filas con campo "Cara" vacio como total
+  pero no las sumaba a flujo ni contraflujo
+- get_cara() devuelve "" si Cara esta vacio -> no matchea "Flujo" ni "Contraflujo"
+- grp_caras = len(group_rows) = 10, pero grp_flujo + grp_contra = 9
+- Fix BD: UPDATE solicitudCaras SET caras_flujo = caras_flujo + diferencia
+- 335 caras corregidas en produccion, 0 mismatches restantes
+
+### posted_to_sap para campanas con APS de usuario:
+- Campanas migradas tenian posted_to_sap = 1 (bloqueadas)
+- Usuarios asignaron APS nuevos (55439-55446) que no existen en CSV
+- Fix: posted_to_sap = 0, posted_aps = JSON con APS del CSV (bloqueados)
+- Campanas afectadas:
+  - 70915 DiDi: posted_aps=[55409], libre: 55439
+  - 70694 TELCEL/R7: posted_aps=[54618,54795,55130,55319], libre: 55440-55442
+  - 70691 STIHL: posted_aps=[54541,54707,55003,55227], libre: 55444
+  - 1397 ALPURA: posted_aps=[1459,1458,1685], libre: 55445-55446
+
+### Campaña 1035 (META - CAMPAÑA MUNDIAL) eliminada:
+- Borrada completamente: 340 reservas, 4 caras, campaña, cotizacion, propuesta, solicitud
+
+### Campaña 1395 renombrada a 1446:
+- Cambio de ID en todas las tablas: solicitud, propuesta, cotizacion, campania,
+  solicitudCaras.idquote, tareas.id_solicitud
+- FK checks deshabilitados temporalmente
+
+### Cara PV con precio 0 corregida:
+- solicitudCaras id 5646 (RT-P1-COB-PV, Cat 13, propuesta 1446)
+- CSV original no tenia precio -> tarifa 0, costo 0
+- Fix: tarifa_publica = 6500, costo = 195000 (30 x 6500)
+- Cotizacion 1446 precio actualizado de 1,202,500 a 2,795,000
+
+### Columnas varchar ampliadas (segunda ronda):
+- 25 columnas entre 100-254 chars ampliadas a 255 o TEXT
+- propuesta.asignado y solicitud.asignado -> TEXT
+- Incluye: campania.nombre, solicitud.asesor/agencia/marca, usuario.correo, etc.
+
+### Mensajes de error especificos al reservar (front - main):
+- Antes: "No hay caras disponibles para reservar" generico
+- Ahora: especifica que tipo esta completo (Flujo/Contraflujo/Bonificacion)
+- Aplica en propuestas (AssignInventarioModal) y campanas (AssignInventarioCampanaModal)
+
+### Clientes SAP - filtro por database (back - main):
+- getSAPClientesByDatabase filtra CUICs solo por misma sap_database
+- Cliente de TRADE ya no desaparece del tab CIMU
+
+### Dashboard filtros cascada (back+front - dev):
+- filter-options devuelve ciudades/formatos/nses con estado/ciudad
+- Frontend: estado -> ciudad -> formato -> NSE en cascada
+- Al cambiar estado se limpian ciudad/formato/NSE
+
+### Compartir propuesta - cliente name (back - dev):
+- getFullDetails ahora busca nombre cliente con fallback a razon_social
+- getPublicDetails mismo fix
+
+### Inventarios - getDisponibles por municipio (back - main):
+- Busca por municipio en vez de plaza para ciudad
+- Fix para Oaxaca y cualquier ciudad donde plaza != municipio
+
+### Notificaciones - tarifa publica en tabla autorizacion (front - dev):
+- Columna "Tarifa" (publica) agregada junto a "Tarifa Efect."
+
+### Solicitudes - catorcena range crea multiples caras (front - dev):
+- Seleccionar rango Cat 6-10 ahora crea 5 caras (una por catorcena)
+- Antes creaba solo 1 cara con catorcenaNum del inicio
+
+### Inventarios - carga masiva mejoras (front - dev):
+- Loading spinner al parsear CSV grande
+- Tabs Errores/OK con paginacion de 50
+- Step check: 3 tabs (nuevos/sobreescribibles/ocupados) con paginacion
+- Botones CSV descarga en cada tab
+- Ocupados muestran nombre de campana
+- Backend: bulkCheck devuelve campana via cotizacion_id JOIN
+- Plantilla CSV descargable en AssignInventarioModal
+
+### DG contaminacion fixes (front - dev):
+- Impar check per group (no global total)
+- Recalculate from _originalDg/_originalDcm on every edit
+- No override already-approved caras
+- Backend: crearTareasAutorizacion contamina sin requerir propuestaId
+
+## CAMBIOS SESION 7 ABRIL 2026 (CONTINUACION)
+
+### Filtros avanzados AND/OR (front - main):
+- Cada conector entre filtros es independiente ("Y" / "O")
+- En español: Y = AND (morado), O = OR (ambar)
+- Click en el conector para alternar
+- Aplica en solicitudes, propuestas y campañas
+
+### Export Layout CSV en versionario (front - main):
+- Campañas tab versionario: boton "Exportar Layout"
+- CSV en formato migracion (una fila por inventario/unidad)
+- Columnas: Campaña, Anunciante, Operacion, APS, CUIC, Articulo, etc.
+- Respeta filtros activos
+
+### Lat/Lng en CSV compartir (front - main):
+- CompartirPropuestaPage y ClientePropuestaPage
+- CSV ahora incluye columnas Latitud y Longitud por fila
+
+### % distribucion flujo/contraflujo (front - main):
+- Input editable (default 50%) entre KPIs de Flujo y Contraflujo
+- En propuestas y campañas (AssignInventarioModal y AssignInventarioCampanaModal)
+- Redistribuye caras segun el %: flujo = ceil(total * pct / 100)
+- Para digitales donde hay mas flujo que contraflujo
+
+### Sync campañas modal con propuestas (front - main):
+- AssignInventarioCampanaModal replicado de propuestas:
+  - % distribucion flujo/contraflujo
+  - Boton descarga plantilla CSV
+  - processedInventory filtra solo cara actual (no todas)
+  - CSV upload matchea contra processedInventory
+  - CSV selection usa processedInventory
+
+### Skip impar validation al editar (front - main):
+- Boton "Actualizar" no se bloquea por caras impar en propuestas y campañas
+- Solo se bloquea al crear cara nueva
+- Frontend: impar + contaminacion solo se re-aplica si authFieldsChanged
+- Frontend: despues de bulk save, confia en servidor (no re-aplica impar)
+
+### No re-auth al editar solo NSE/ciudad (front+back - main):
+- Frontend: skip impar + contaminacion si auth fields no cambiaron
+- Backend: bulkUpdateCaras en propuestas y campañas ahora verifica
+  authFieldsChanged antes de recalcular autorizacion
+- Si solo cambia NSE/ciudad, caras aprobadas se quedan aprobadas
+- Campos que SÍ triggerean re-auth: caras, bonificacion, tarifa_publica,
+  formato, tipo, articulo
+
+### Tickets - 5 tabs + validacion (front - main):
+- TicketsPage (usuario): 5 tabs (Pendientes, En Proceso, Validacion, Resueltos, Cerrados)
+- HistorialTicketsPage (admin): mismas 5 tabs
+- DevTicketsPage: Validacion agregada a STATUS_CONFIG
+- Nuevo status "Validacion" para tickets esperando confirmacion del usuario
+- Contadores en Pendientes/En Proceso/Validacion, sin contadores en Resueltos/Cerrados
+- Puntito rojo animado en tab con mensajes sin leer
+
+### Tickets - asignacion con colores (front+back - main):
+- Cada miembro del equipo tiene color: Jos=cyan, Akary=pink, Mario=verde, Bladi=ambar
+- Select dropdown en ticket expandido para cambiar asignado
+- Tag con color en lista de tickets
+- "Sin atender" en ambar cuando no hay asignado
+- Backend: tickets.controller acepta status_cambiado_por override
+
+### Filtro de periodo en compartir (front - dev):
+- CompartirPropuestaPage y ClientePropuestaPage
+- Dropdown visible "Todos los periodos" con catorcenas disponibles
+- Filtra tabla e inventario por catorcena seleccionada
+- "Catorcena" tambien agregada como campo en filtros avanzados
+
+### Compartir propuesta - cliente name fix (back - main):
+- getFullDetails y getPublicDetails buscan nombre cliente
+- Fallback a razon_social si cliente no encontrado por ID
+
+### Clientes SAP - filtro por database (back - main):
+- getSAPClientesByDatabase filtra CUICs solo por misma sap_database
+- Cliente de TRADE ya no desaparece del tab CIMU
+
+### Dashboard filtros cascada (front+back - main):
+- filter-options devuelve ciudades/formatos/nses con estado/ciudad
+- Frontend: estado -> ciudad -> formato -> NSE en cascada
+- Al cambiar estado se limpian ciudad/formato/NSE
+
+### Build fixes (front - main):
+- artes_multiples agregada a interface InventarioConArte
+- vite.config.ts: type-only import para Plugin
+- HistorialTicketsPage: bracket extra removido, statusMutation scope fix
+
+## CAMBIOS EN BASE DE DATOS (7 abril 2026)
+
+### Columnas varchar ampliadas (segunda ronda):
+- 25 columnas entre 100-254 chars ampliadas a 255 o TEXT
+- propuesta.asignado y solicitud.asignado -> TEXT
+
+### Articulos erroneos corregidos:
+- Propuesta 80046: CF-0015->RT-P2-COB-AC, CF-0016->RT-P2-COB-OX, CF-0215->RT-P1-COB-PB
+- Propuesta 80035: CF-0214->RT-P1-COB-MY (cat 8), CF-0214->RT-P1-COB-GDL + ciudad GUADALAJARA (cat 9)
+- Propuesta 80077: RT-P1-PRA-MX->RT-P1-COB-MX (8 caras, cat 19-26)
+
+### Solicitudes nombre_usuario/id corregidas:
+- 80050, 80052, 80055, 80042, 80045: usuario_id y nombre corregidos multiples veces
+- 80041, 80044: igual
+- Al final: usuario_id e id_asignado apuntan al usuario correcto por nombre
+
+### Oaxaca inventario estado:
+- Se intento cambiar estado de "Oaxaca de Juarez" a "Oaxaca" pero se revirtio
+- El fix fue en el codigo (municipio en vez de plaza), no en datos
+
+### Clientes faltantes importados:
+- 27 CUICs que no existian en tabla cliente (campañas migradas con cliente_id=0)
+- Importados manualmente desde SAP
+- 74 solicitudes y 74 campañas actualizadas con cliente_id correcto
+- 0 solicitudes sin cliente restantes
+
+### posted_to_sap y posted_aps:
+- 419 campañas desbloqueadas: posted_to_sap = 0
+- 366 campañas con posted_aps del CSV (APS especificos bloqueados por grupo)
+- posted_aps convertido de strings a numbers para matchear frontend
+- Campaña 70466 (L'Oreal): desbloqueada, APS 55450 del usuario libre
+- posted_to_sap ya NO se usa para bloquear globalmente
+- posted_aps controla bloqueo por grupo individual
+
+### Solicitud 80057 contaminacion DG:
+- 10 caras DCM actualizadas a DG pendiente (contaminacion)
+- Datos anteriores a implementacion de contaminacion
+
+### CSV usuarios generado:
+- Layout_QEB_con_usuarios.csv: 62,383 matcheados, 266,162 sin vendedor
+- 20 vendedores unicos matcheados contra tabla usuario de produccion
+
+## CAMBIOS PENDIENTES DE SUBIR
+
+### En dev pero NO en main:
+- Filtro de periodo en compartir propuesta (front)
+- Cleanup logs debug en propuestas.controller (back)
+
+## COMO CORRER LA MIGRACION
+
+1. Borrar datos migrados en produccion:
+   - Desde Claude Code o Workbench, correr delete_migration_prod.sql
+   - O usar el script de borrado por batches (Node.js) para evitar timeouts
+
+2. Correr migracion:
+   cd C:\Users\Mario\OneDrive\Documents\QEB\extras\scripts
+   python migrate_campaigns.py
+
+3. Post-migracion:
+   - Marcar campanias migradas como posted_to_sap = 1
+   - Agregar usuario al listado de asignados
+
+4. Verificar:
+   - Campanas creadas vs extendidas
+   - DIDI campana #70915 con reservas
+   - Campanas incompletas (inventario de DIDI quitado)
+   - 0 duplicados de inventario DIDI
+   - usuario_id y nombre_usuario correctos
+
+## ESTRUCTURA DE CARPETAS
+
+extras/
+  CONTEXTO_MIGRACION.txt        <- este archivo
+  GUIA_IMPORTAR_DO.txt
+  Logo Grupo IMU.png
+  QEB-SAP.txt
+  clientes-migracion.txt
+  articulos/                    <- articulos erroneos
+  didi/                         <- archivos DIDI
+  inventario/                   <- inventario IMU
+  layouts-originales/           <- CSVs sin modificar
+  listos-para-cargar/           <- CSVs finales para migracion
+  scripts/                      <- Python, JS, SQL
+  validaciones/                 <- CSVs de validacion cat02-cat07
+
+## NOTAS TECNICAS
+
+### DigitalOcean MySQL 8 vs Hostinger MariaDB:
+- MySQL 8 es mas estricto con varchar: rechaza datos mas largos
+- Se ampliaron todas las columnas varchar < 255 a varchar(255)
+- Campos de texto largo (asignado, descripcion, etc.) a TEXT
+- sql_require_primary_key = 0 necesario para importar
+- sql_mode debe ser permisivo para fechas (curdate() en datetime)
+- SSL requerido: sslcert o sslaccept=accept_invalid_certs
+
+### Oaxaca inventario:
+- estado en inventarios = "Oaxaca de Juarez" (correcto, no se cambio)
+- plaza = "Oaxaca", municipio = "OAXACA DE JUAREZ"
+- El fix fue cambiar backend para buscar por municipio en vez de plaza
+
+### cliente_id en solicitudes:
+- El frontend manda CUIC como cliente_id (NO el id real del registro cliente)
+- Fix: backend busca cliente por CUIC en vez de por id para nombre correcto
+- Afecta: PDF compartir, vista compartir, cliente propuesta page
+
+### FortiClient VPN:
+- Servicio: FA_Scheduler (net start/stop FA_Scheduler)
+- Necesario para acceder a SAP (10.1.0.9:50000)
+- Si no conecta: reiniciar servicio desde CMD admin
+
+### Power BI:
+- Se puede conectar directo a MySQL de DigitalOcean
+- Agregar IP de Power BI en Trusted Sources
+- Estructura definida en Estructura_BI_IMU (1).pdf
+- Vistas SQL creadas en producción (ver CONTEXTO_POWER_BI.txt)
+- Documento de respuesta: extras/Respuesta_Estructura_BI_QEB.md
+
+### Corrección sap_database campañas migradas (7 abril 2026):
+- Regla: IDs 1000-2000 = TRADE, IDs 60000+ = CIMU
+- Total migradas: 424
+- 309 ya estaban OK
+- 42 tenían CIMU pero debían ser TRADE → corregidas con cliente TRADE
+- 3 tenían TRADE pero debían ser CIMU → corregidas con cliente CIMU
+  - 11734 (DOVER MEDIOS) → CIMU, cliente_id 373
+  - 70488 (COPPEL) → CIMU, cliente_id 21
+  - 70601 (BARCEL) → CIMU, cliente_id 374
+- 33 tenían NULL → asignadas según rango con cliente correcto
+- 2 no tenían cliente TRADE en BD → importados manualmente por Mario:
+  - 1426 UNIVERSAL TV (CUIC 9483) → cliente_id 400, CardCode IMU00745
+  - 1461 GRUPO MUSICAL CAÑAVERAL (CUIC 10636) → cliente_id 401, CardCode IMU01119
+- 34 cortesías/comodines (CUIC 0, IDs 80120-80153) → sap_database NULL (no aplica SAP)
+- 0 pendientes
+
+### Campañas con rango desconocido:
+- 10757 (ORIONWW) → tiene CIMU, ID fuera de rango 1000-2000 y 60000+
+- Dejada como está

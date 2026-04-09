@@ -1,0 +1,56 @@
+GUIA PARA IMPORTAR SQL DE HOSTINGER A DIGITAL OCEAN
+=====================================================
+
+1. EXPORTAR desde phpMyAdmin de Hostinger (base u658050396_QEB)
+   - Exportar como SQL
+
+2. LIMPIAR EL ARCHIVO SQL (pedirle a Claude):
+
+   a) Agregar al inicio del archivo:
+      SET SESSION sql_require_primary_key = 0;
+      SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO,NO_ENGINE_SUBSTITUTION';
+
+   b) Quitar el bloque de PROCEDIMIENTOS:
+      Eliminar todo entre "DELIMITER $$" y "DELIMITER ;"
+      (el procedimiento actualizar_reservas con CREATE DEFINER)
+
+   c) Arreglar campos DATE con default invalido:
+      - `campo` date NOT NULL DEFAULT current_timestamp()  -->  `campo` date NOT NULL
+      - `campo` date DEFAULT current_timestamp()  -->  `campo` date DEFAULT NULL
+      - `campo` date NOT NULL DEFAULT curdate()  -->  `campo` date NOT NULL
+      - `campo` date NOT NULL DEFAULT (curdate() + interval X day)  -->  `campo` date NOT NULL
+      - `campo` datetime NOT NULL DEFAULT curdate()  -->  `campo` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
+
+      IMPORTANTE: el regex puede borrar el nombre de la columna. Verificar que no queden
+      columnas con nombre vacio: `` date NOT NULL
+
+      Columnas conocidas que se afectan:
+      - propuesta.fecha
+      - reservas.fecha_reserva
+      - solicitudCaras.inicio_periodo
+      - solicitudCaras.fin_periodo
+      - tareas.fecha_inicio
+      - calendario.fecha_inicio
+      - calendario.fecha_fin
+
+3. IMPORTAR en MySQL Workbench:
+
+   a) Conectar a Digital Ocean:
+      - Host: qeb-mysql-prod-do-user-32408772-0.g.db.ondigitalocean.com
+      - Port: 25060
+      - User: doadmin
+      - Password: AVNS_GUPCVh6o1ZSAOK0EL0J
+      - SSL: Require (con CA certificate descargado de DO)
+
+   b) Antes de importar, limpiar DB existente:
+      SET FOREIGN_KEY_CHECKS = 0;
+      DROP DATABASE defaultdb;
+      CREATE DATABASE defaultdb;
+
+   c) Server > Data Import > Import from Self-Contained File
+      - Archivo: el .sql limpio
+      - Default Target Schema: defaultdb
+      - Start Import
+
+4. DATABASE_URL para el backend:
+   mysql://doadmin:AVNS_GUPCVh6o1ZSAOK0EL0J@qeb-mysql-prod-do-user-32408772-0.g.db.ondigitalocean.com:25060/defaultdb?ssl={"rejectUnauthorized":true}

@@ -1,0 +1,199 @@
+===============================================================================
+CONTEXTO POWER BI - Integración QEB con Business Intelligence
+Fecha: 7 abril 2026
+===============================================================================
+
+## RESUMEN GENERAL
+
+- Equipo de BI pidió que QEB exponga datos equivalentes a 3 vistas de SAP
+- Documento de referencia: Estructura_BI_IMU (1).pdf (en Downloads de Mario)
+- Se crearon vistas SQL directamente en la BD de producción (DigitalOcean)
+- Las vistas son de solo lectura, se actualizan en tiempo real (no snapshots)
+- Power BI se conecta directo a MySQL y lee las vistas como tablas
+
+## DOCUMENTO ORIGINAL (Estructura_BI_IMU)
+
+El doc pide 3 vistas de SAP con varias tablas técnicas cada una:
+
+### Vista V_BI_APS_ESPECIFICOS:
+- ORDR: Encabezado de pedido de venta / APS Global
+- RDR1: Líneas del pedido / Detalle de APS Global
+- OSLP: Catálogo de asesores comerciales
+- OUSR: Catálogo de usuarios
+- OOCR: Reglas de distribución / centros de costo
+
+### Vista V_OPORTUNIDADES_PROPUESTA:
+- OQUT: Encabezado de propuesta / cotización
+- QUT1: Líneas de propuesta / detalle
+- ODRF: Borradores (encabezado) - NO APLICA en QEB
+- DRF1: Líneas de borrador - NO APLICA en QEB
+
+### Vista V_OPORTUNIDADES:
+- OOPR: Oportunidades (encabezado)
+- OPR1: Líneas de oportunidad / documentos relacionados
+- OOST: Catálogo de fases de oportunidad
+- OCLG: Actividades - NO APLICA en QEB
+
+## VISTAS CREADAS EN DIGITALOCEAN
+
+Se separaron en vistas individuales por tabla técnica para que Power BI
+pueda hacer sus propias relaciones (modelo estrella):
+
+### V_ORDR (Encabezado campaña/APS)
+- Fuente: campania + cotizacion + propuesta + solicitud
+- 1 fila por campaña
+- Campos: U_CIC, DocNum, U_TIPO_Venta, CardCode, CardName, DocDate,
+  CreateDate, DocTime(NULL), DocStatus, DocEntry, SlpCode, UserSign,
+  CANCELED, U_IMU_Valido, U_IMU_Propuesta
+
+### V_RDR1 (Líneas/caras del APS)
+- Fuente: solicitudCaras + catorcenas + reservas
+- N filas por campaña (1 por cara)
+- JOIN con V_ORDR por DocEntry = BaseRef
+- Campos: BaseRef, U_Renta, U_dscMarca, U_dscCamp, U_dscPeriod, U_CodPer,
+  U_dscSitio, U_Cod_Sitio(NULL), Dscription, U_dscTAsig, U_Tipo_Digital,
+  ItemCode, Price, LineTotal, Quantity, DocEntry, OcrCode(NULL),
+  TrgetEntry(NULL), LineNum
+
+### V_OQUT (Encabezado propuesta)
+- Fuente: propuesta + solicitud
+- 1 fila por propuesta
+- Campos: U_CIC, U_TIPO_Venta, CardCode, CardName, DocDate, DocNum,
+  CreateDate, DocTime(NULL), DocEntry, CANCELED
+
+### V_QUT1 (Líneas/caras de propuesta)
+- Fuente: solicitudCaras + catorcenas + reservas
+- N filas por propuesta (1 por cara)
+- JOIN con V_OQUT por DocEntry
+- Campos: DocEntry, U_Renta, U_dscMarca, U_dscCamp, U_dscPeriod, U_CodPer,
+  U_dscSitio, U_Cod_Sitio(NULL), Dscription, U_dscTAsig, U_Tipo_Digital,
+  ItemCode, Price, LineTotal, Quantity
+
+### V_OOPR (Oportunidades/Solicitudes)
+- Fuente: solicitud
+- 1 fila por solicitud
+- Campos: OpenDate, OpprId, CardCode, CardName, U_RazonSocial,
+  CloseDate(NULL), MaxSumLoc, CreateDate, CloPrcnt(NULL), U_Asesor,
+  U_Agencia, U_Cliente, U_Marca, U_Producto, U_Categoria, u_isLead,
+  Name, StepLast, Status, OpprType
+
+### V_OPR1 (Documentos relacionados a oportunidad)
+- Fuente: solicitud + propuesta
+- N filas por solicitud
+- JOIN con V_OOPR por OpprId
+- Campos: OpprId, DocNumber, ObjType, Line, DocId, OpenDate
+
+### V_OSLP (Catálogo asesores)
+- Fuente: usuario (donde sap_asesor_id no es null)
+- Campos: SlpCode, SlpName
+
+### V_OUSR (Catálogo usuarios)
+- Fuente: usuario
+- Campos: USERID, U_NAME
+
+### V_OOCR (Centros de costo)
+- VACÍA - QEB no maneja centros de costo
+- Pendiente: preguntar si necesitan catálogo
+
+### V_OOST (Fases de oportunidad)
+- Estática: Pendiente, En Proceso, Aprobada, Rechazada, Cancelada
+- Campos: StepId, Descript
+
+### V_OCLG (Actividades)
+- VACÍA - QEB no maneja actividades CRM
+- Pendiente: preguntar si necesitan
+
+## RELACIONES ENTRE VISTAS
+
+V_ORDR.DocEntry ↔ V_RDR1.DocEntry (campaña → líneas)
+V_ORDR.SlpCode ↔ V_OSLP.SlpCode (campaña → asesor)
+V_ORDR.UserSign ↔ V_OUSR.USERID (campaña → usuario creador)
+V_RDR1.OcrCode ↔ V_OOCR.OcrCode (línea → centro de costo)
+V_OQUT.DocEntry ↔ V_QUT1.DocEntry (propuesta → líneas)
+V_OOPR.OpprId ↔ V_OPR1.OpprId (oportunidad → documentos)
+V_OOPR.StepLast ↔ V_OOST.Descript (oportunidad → fase)
+
+## CAMPOS NULL (PENDIENTES DE DEFINIR)
+
+### En V_ORDR y V_OQUT:
+- DocTime: QEB no guarda hora como campo separado
+
+### En V_RDR1 y V_QUT1:
+- U_Cod_Sitio: Solo tenemos nombre de plaza, no código numérico
+- OcrCode: Centro de costo viene de SAP (U_IMU_OcrCode del artículo)
+- TrgetEntry: Referencia al DeliveryNote de SAP (no se almacena en QEB)
+
+### En V_OOPR:
+- CloseDate: QEB no tiene fecha de cierre de oportunidad
+- CloPrcnt: QEB no maneja porcentaje de cierre
+
+### Tablas vacías:
+- V_OOCR: Sin catálogo de centros de costo
+- V_OCLG: Sin actividades CRM
+- ODRF/DRF1: No implementadas (QEB no maneja borradores)
+
+## MAPEO QEB → SAP
+
+| Campo SAP | Campo QEB | Tabla QEB |
+|-----------|-----------|-----------|
+| U_CIC | cuic | solicitud |
+| DocNum (APS) | id | campania |
+| CardCode | card_code | solicitud |
+| CardName | razon_social | solicitud |
+| DocDate | fecha_inicio | campania |
+| CreateDate | fecha | solicitud |
+| DocStatus | status | campania |
+| SlpCode | salesperson_code | solicitud |
+| UserSign | usuario_id | solicitud |
+| U_Renta | caras | solicitudCaras |
+| U_dscMarca | marca_nombre | solicitud |
+| U_dscCamp | producto_nombre | solicitud |
+| U_dscPeriod | numero_catorcena + año | catorcenas |
+| U_CodPer | id | catorcenas |
+| U_dscSitio | estados | solicitudCaras |
+| Dscription | formato | solicitudCaras |
+| U_dscTAsig | estatus | reservas (MAX) |
+| U_Tipo_Digital | tipo | solicitudCaras |
+| ItemCode | articulo | solicitudCaras |
+| Price | tarifa_publica | solicitudCaras |
+| LineTotal | costo | solicitudCaras |
+| Quantity | caras + bonificacion | solicitudCaras |
+| SlpName | nombre | usuario |
+| U_NAME | nombre | usuario |
+
+## COLLATION
+
+- Se usó COLLATE utf8mb4_unicode_ci en el JOIN de solicitudCaras.idquote
+  con CAST(pr.id AS CHAR) porque las tablas tienen collation diferente
+  (utf8mb4_unicode_ci vs utf8mb4_general_ci)
+
+## CONEXIÓN POWER BI
+
+Servidor: qeb-mysql-prod-do-user-32408772-0.g.db.ondigitalocean.com
+Puerto: 25060
+Base de datos: u658050396_QEB
+Usuario: doadmin
+Password: AVNS_GUPCVh6o1ZSAOK0EL0J
+SSL: Requerido
+Cert: ca-certificate.crt (descargar de DigitalOcean)
+
+REQUISITO: Agregar IP de Power BI en Trusted Sources de DigitalOcean
+
+## DOCUMENTO DE RESPUESTA
+
+Se generó documento formal de respuesta en:
+extras/Respuesta_Estructura_BI_QEB.md
+
+Incluye:
+- Resumen de vistas creadas
+- Campos pendientes con preguntas específicas
+- Datos de conexión
+- Nota sobre ODRF/DRF1 y OCLG
+
+## NOTAS TÉCNICAS
+
+- Las vistas NO almacenan datos, son queries en tiempo real
+- Cada consulta a una vista ejecuta el JOIN contra las tablas reales
+- Si la BD crece mucho, considerar materializar las vistas (tabla + cron)
+- V_RDR1 y V_QUT1 pueden ser pesadas por el JOIN con reservas
+- El subquery de reservas (MAX estatus) se ejecuta cada vez
